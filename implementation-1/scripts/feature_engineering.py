@@ -2,25 +2,42 @@ import pandas as pd
 import geopandas as gpd
 
 
-def extract_features(roads, speed, lanes, road_class, ksi):
-    # Join road attributes (replace 'ID' with actual key)
-    roads = roads.merge(speed, on="ID", how="left")
-    roads = roads.merge(lanes, on="ID", how="left")
-    roads = roads.merge(road_class, on="ID", how="left")
-
-    # Example feature: high speed
-    roads["high_speed"] = roads["SPEED_LIMIT"] > 50
-
-    # Spatial join: count crashes per road segment
-    crashes_gdf = gpd.GeoDataFrame(
-        ksi,
-        geometry=gpd.points_from_xy(ksi["LONGITUDE"], ksi["LATITUDE"]),
-        crs=roads.crs,
+def extract_features(roads, speed, lanes, road_class):
+    # Join speed limit
+    roads = roads.merge(
+        speed[["ORN_ROAD_NET_ELEMENT_ID", "SPEED_LIMIT"]],
+        left_on="OGF_ID",
+        right_on="ORN_ROAD_NET_ELEMENT_ID",
+        how="left",
     )
-    joined = gpd.sjoin(crashes_gdf, roads, how="left", predicate="intersects")
-    crash_counts = joined.groupby("ID").size().rename("crash_count")
-    roads = roads.join(crash_counts, on="ID").fillna({"crash_count": 0})
-
+    # Join number of lanes
+    roads = roads.merge(
+        lanes[["ORN_ROAD_NET_ELEMENT_ID", "NUMBER_OF_LANES"]],
+        left_on="OGF_ID",
+        right_on="ORN_ROAD_NET_ELEMENT_ID",
+        how="left",
+        suffixes=("", "_lanes"),
+    )
+    # Join road class
+    roads = roads.merge(
+        road_class[["ORN_ROAD_NET_ELEMENT_ID", "ROAD_CLASS"]],
+        left_on="OGF_ID",
+        right_on="ORN_ROAD_NET_ELEMENT_ID",
+        how="left",
+        suffixes=("", "_class"),
+    )
+    # Example feature: high speed
+    roads["high_speed"] = roads["SPEED_LIMIT"].astype(float) > 50
+    # Example feature: fill missing number of lanes with 1
+    roads["NUMBER_OF_LANES"] = roads["NUMBER_OF_LANES"].fillna(1).astype(int)
+    # Drop duplicate join columns
+    roads = roads.drop(
+        columns=[
+            col
+            for col in roads.columns
+            if col.startswith("ORN_ROAD_NET_ELEMENT_ID") and col != "OGF_ID"
+        ]
+    )
     return roads
 
 
@@ -29,5 +46,5 @@ if __name__ == "__main__":
     from data_loading import load_data
 
     roads, speed, lanes, road_class, ksi = load_data()
-    features = extract_features(roads, speed, lanes, road_class, ksi)
+    features = extract_features(roads, speed, lanes, road_class)
     print(features.head())
