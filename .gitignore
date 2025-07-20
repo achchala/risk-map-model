@@ -40,6 +40,15 @@ venv.bak/
 *.swo
 *~
 
+# Data files (large files - not tracked in git)
+data/*.xlsx
+data/*.csv
+data/*.geojson
+data/*.shp
+data/*.dbf
+data/*.shx
+data/*.prj
+
 # Model files (if stored elsewhere)
 models/*.pkl
 models/*.joblib
