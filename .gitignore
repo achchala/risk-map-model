@@ -40,27 +40,10 @@ venv.bak/
 *.swo
 *~
 
-# Data files (large files)
-data/*.xlsx
-data/*.csv
-data/*.geojson
-data/*.shp
-data/*.dbf
-data/*.shx
-data/*.prj
-
-# Model files
+# Model files (if stored elsewhere)
 models/*.pkl
 models/*.joblib
 models/*.h5
-
-# Outputs
-outputs/maps/*
-outputs/models/*
-outputs/reports/*
-!outputs/maps/.gitkeep
-!outputs/models/.gitkeep
-!outputs/reports/.gitkeep
 
 # OS
 .DS_Store
