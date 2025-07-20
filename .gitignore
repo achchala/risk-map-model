@@ -54,6 +54,14 @@ models/*.pkl
 models/*.joblib
 models/*.h5
 
+# Outputs (large generated files - not tracked in git)
+outputs/maps/*
+outputs/models/*
+outputs/reports/*
+!outputs/maps/.gitkeep
+!outputs/models/.gitkeep
+!outputs/reports/.gitkeep
+
 # OS
 .DS_Store
 Thumbs.db
