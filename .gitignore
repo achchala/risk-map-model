@@ -1,2 +1,12 @@
-# .gitignore
+# Ignore data files and outputs
 implementation-1/data/KSI.geojson
+implementation-1/data/ORN_data/*.shp
+implementation-1/data/ORN_data/*.dbf
+implementation-1/data/ORN_data/*.shx
+implementation-1/data/ORN_data/*.prj
+implementation-1/data/ORN_data/*.cpg
+implementation-1/data/ORN_data/*.csv
+*.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.DS_Store
