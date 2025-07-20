@@ -18,9 +18,6 @@ implementation-1/
     data_loading.py              # Load and join data
     feature_engineering.py       # Feature extraction
     modeling.py                  # Model training and prediction
-    visualization.py             # Map visualization
-  ui/
-    app.py                      # Web UI for map and filtering
   .gitignore
   README.md
 ```
