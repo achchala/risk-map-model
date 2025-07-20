@@ -254,14 +254,14 @@ def test_feature_engineering():
     Test function for feature engineering
     """
     from data_processing.data_loader import load_and_clean_data
-    from data_processing.spatial_join import perform_spatial_join
+    from data_processing.spatial_join_fast import perform_spatial_join_fast
     
     logging.basicConfig(level=logging.INFO)
     data_dir = Path("data")
     
     # Load and join data
     collision_data, ksi_data, road_network = load_and_clean_data(data_dir)
-    segment_crashes = perform_spatial_join(collision_data, ksi_data, road_network)
+    segment_crashes = perform_spatial_join_fast(collision_data, ksi_data, road_network)
     
     # Create features
     features = create_segment_features(segment_crashes, road_network)

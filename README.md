@@ -11,17 +11,17 @@ risk-map-model/
 │   ├── TOTAL_KSI_6386614326836635957.csv
 │   └── Centreline - Version 2 - 4326.geojson
 ├── src/                           # Source code
-│   ├── data_processing/           # Data cleaning and preprocessing
-│   ├── feature_engineering/       # Feature creation and engineering
-│   ├── modeling/                  # ML model training and evaluation
-│   └── visualization/             # Mapping and plotting utilities
-├── models/                        # Trained model files
+│   ├── data_processing/           # Data cleaning and spatial joins
+│   ├── feature_engineering/       # Feature creation and risk labeling
+│   ├── models/                    # Model training and evaluation
+│   └── visualization/             # Interactive maps and dashboards
 ├── outputs/                       # Generated outputs
-│   ├── maps/                      # Interactive maps and visualizations
-│   ├── models/                    # Saved model artifacts
-│   └── reports/                   # Analysis reports and metrics
-├── notebooks/                     # Jupyter notebooks for exploration
-└── docs/                          # Documentation
+│   ├── maps/                      # Interactive risk maps (HTML)
+│   ├── models/                    # Trained model artifacts
+│   └── reports/                   # Analysis reports and data exports
+├── run_risk_analysis.py           # Main pipeline script
+├── config.py                      # Configuration settings
+└── requirements.txt               # Python dependencies
 ```
 
 ## Data Sources
@@ -30,16 +30,19 @@ risk-map-model/
 3. **Road Network Geometry**: Toronto Open Data Portal - road segment geometries
 
 ## Key Features
-- **Spatial Processing**: 20m buffer spatial join for crash-to-segment matching
-- **Feature Engineering**: Crash counts, KSI ratios, temporal patterns, road characteristics
-- **Risk Classification**: 3-class model (Low/Medium/High) with probability scores
-- **Geospatial Output**: GeoJSON format for mapping applications
+- **Spatial Processing**: Optimized spatial join for crash-to-segment matching
+- **Feature Engineering**: Crash statistics, temporal patterns, road characteristics
+- **Risk Classification**: 3-class model (Low/Medium/High) with confidence scores
+- **Interactive Visualization**: HTML dashboards with risk maps and performance metrics
+- **Model Performance**: Detailed evaluation including confusion matrix and per-class metrics
+- **Data Export**: GeoJSON and CSV formats for further analysis
 
 ## Model Approach
-- **Algorithm**: Random Forest Classifier (interpretable, handles mixed data types)
-- **Evaluation**: 5-fold cross-validation with class balancing
-- **Features**: Segment-level crash statistics, temporal patterns, road class
-- **Output**: Risk labels + probability scores per road segment
+- **Algorithm**: Random Forest Classifier with SMOTE for class balancing
+- **Evaluation**: Cross-validation with detailed performance metrics (accuracy, precision, recall, F1-score)
+- **Features**: Segment-level crash statistics, temporal patterns, road characteristics
+- **Output**: Risk labels + confidence scores per road segment
+- **Performance Reporting**: Confusion matrix and per-class performance analysis
 
 ## Installation
 ```bash
@@ -48,8 +51,12 @@ pip install -r requirements.txt
 
 ## Usage
 1. Place your datasets in the `data/` folder
-2. Run the main pipeline: `python src/main.py`
-3. View outputs in `outputs/` folder
+2. Run the main pipeline: `python run_risk_analysis.py`
+3. View outputs in `outputs/` folder:
+   - **Interactive Dashboard**: `outputs/maps/toronto_risk_analysis_dashboard.html`
+   - **Risk Map**: `outputs/maps/toronto_risk_map.html`
+   - **Summary Report**: `outputs/reports/risk_analysis_summary.html`
+   - **Data Exports**: `outputs/reports/` (CSV and GeoJSON files)
 
 ## Limitations (MVP)
 - No traffic volume/exposure data

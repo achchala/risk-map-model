@@ -112,14 +112,14 @@ class ModelEvaluator:
         print("="*60)
         
         # Overall metrics
-        print(f"\n📊 OVERALL PERFORMANCE:")
+        print(f"\n OVERALL PERFORMANCE:")
         print(f"  Accuracy:  {self.results['accuracy']:.4f}")
         print(f"  Precision: {self.results['precision']:.4f}")
         print(f"  Recall:    {self.results['recall']:.4f}")
         print(f"  F1-Score:  {self.results['f1_score']:.4f}")
         
         # Per-class performance
-        print(f"\n🎯 PER-CLASS PERFORMANCE:")
+        print(f"\n PER-CLASS PERFORMANCE:")
         for i, class_name in enumerate(self.class_names):
             print(f"  {class_name.upper()} RISK:")
             print(f"    Precision: {self.results['precision_per_class'][i]:.4f}")
@@ -127,7 +127,7 @@ class ModelEvaluator:
             print(f"    F1-Score:  {self.results['f1_per_class'][i]:.4f}")
         
         # Confusion matrix
-        print(f"\n🔍 CONFUSION MATRIX:")
+        print(f"\n CONFUSION MATRIX:")
         cm = self.results['confusion_matrix']
         print("           Predicted")
         print("           Low  Med  High")
@@ -136,7 +136,7 @@ class ModelEvaluator:
         print(f"      High  {cm[2][0]:4d} {cm[2][1]:4d} {cm[2][2]:4d}")
         
         # Classification report
-        print(f"\n📋 DETAILED CLASSIFICATION REPORT:")
+        print(f"\n DETAILED CLASSIFICATION REPORT:")
         report = self.results['classification_report']
         for class_name in self.class_names:
             if class_name in report:

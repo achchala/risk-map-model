@@ -51,7 +51,9 @@ class ModelTrainer:
         self.model = None
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
-        self.feature_columns = None
+        # Always fit on all possible classes
+        self.label_encoder.fit(['low', 'medium', 'high'])
+        self.feature_columns = []
         self.class_weights = None
         self.best_params = None
         self.cv_scores = None
@@ -68,7 +70,7 @@ class ModelTrainer:
         """
         logger.info("Preparing features for model training...")
         
-        # Define feature columns (exclude non-feature columns)
+        # Define feature columns (exclude non-feature columns and target-encoding features)
         exclude_columns = [
             'geometry', 'segment_id', '_id', 'CENTRELINE_ID', 'LINEAR_NAME_ID',
             'LINEAR_NAME_FULL', 'LINEAR_NAME_FULL_LEGAL', 'ADDRESS_L', 'ADDRESS_R',
@@ -79,7 +81,13 @@ class ModelTrainer:
             'LINEAR_NAME', 'LINEAR_NAME_TYPE', 'LINEAR_NAME_DIR', 'LINEAR_NAME_DESC',
             'LINEAR_NAME_LABEL', 'FROM_INTERSECTION_ID', 'TO_INTERSECTION_ID',
             'ONEWAY_DIR_CODE', 'ONEWAY_DIR_CODE_DESC', 'FEATURE_CODE', 'FEATURE_CODE_DESC',
-            'JURISDICTION', 'CENTRELINE_STATUS', 'OBJECTID', 'MI_PRINX'
+            'JURISDICTION', 'CENTRELINE_STATUS', 'OBJECTID', 'MI_PRINX',
+            # Target-encoding features causing data leakage
+            'risk_label', 'risk_level', 'fatality_flag', 'risk_score_raw', 'severity_index',
+            # Direct outcome variables used for labeling (data leakage)
+            'num_total_crashes', 'num_ksi_crashes', 'fatality_count', 'has_crashes', 'has_ksi', 'has_fatalities',
+            'ksi_ratio', 'fatality_ratio', 'crash_density', 'ksi_density',
+            'length_crash_interaction', 'length_ksi_interaction'
         ]
         
         # Get feature columns
@@ -203,8 +211,9 @@ class ModelTrainer:
         
         # Make predictions
         y_pred = self.model.predict(X_test_scaled)
+        y_pred_proba = self.model.predict_proba(X_test_scaled)
         
-        # Calculate metrics
+        # Calculate basic metrics
         accuracy = accuracy_score(y_test, y_pred)
         
         # Cross-validation scores
@@ -212,6 +221,27 @@ class ModelTrainer:
             self.model, X_train_scaled, y_train, cv=5, scoring='f1_macro'
         )
         self.cv_scores = cv_scores
+        
+        # Calculate detailed performance metrics
+        from sklearn.metrics import classification_report, confusion_matrix, precision_recall_fscore_support
+        
+        # Classification report
+        class_report = classification_report(y_test, y_pred, output_dict=True)
+        
+        # Confusion matrix
+        cm = confusion_matrix(y_test, y_pred)
+        
+        # Per-class metrics
+        precision, recall, f1, support = precision_recall_fscore_support(y_test, y_pred, average=None)
+        
+        # Prediction confidence analysis
+        max_proba = np.max(y_pred_proba, axis=1)
+        confidence_analysis = {
+            'mean_confidence': np.mean(max_proba),
+            'confidence_when_correct': np.mean(max_proba[y_test == y_pred]),
+            'confidence_when_wrong': np.mean(max_proba[y_test != y_pred]),
+            'high_confidence_errors': np.sum((max_proba > 0.8) & (y_test != y_pred))
+        }
         
         # Prepare results
         results = {
@@ -222,8 +252,16 @@ class ModelTrainer:
             'feature_importance': dict(zip(self.feature_columns, self.model.feature_importances_)),
             'y_test': y_test,
             'y_pred': y_pred,
+            'y_pred_proba': y_pred_proba,
             'X_test': X_test,
-            'X_test_scaled': X_test_scaled
+            'X_test_scaled': X_test_scaled,
+            'classification_report': class_report,
+            'confusion_matrix': cm,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'support': support,
+            'confidence_analysis': confidence_analysis
         }
         
         logger.info(f"Model training completed!")
