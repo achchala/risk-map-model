@@ -1,9 +1,19 @@
 import geopandas as gpd
 import pandas as pd
 import os
+from shapely.geometry import LineString
+
+
+def drop_z(geom):
+    if hasattr(geom, "has_z") and geom.has_z:
+        return LineString([(x, y) for x, y, *_ in geom.coords])
+    return geom
 
 
 def spatial_join_crashes(roads, ksi):
+    # Ensure all geometries are 2D and valid
+    roads = roads[roads.is_valid & roads.geometry.notnull()].copy()
+    roads["geometry"] = roads["geometry"].apply(drop_z)
     # Ensure CRS matches
     if roads.crs is None:
         roads = roads.set_crs("EPSG:4326")
@@ -17,11 +27,13 @@ def spatial_join_crashes(roads, ksi):
     roads_proj = roads.to_crs("EPSG:32617")
     roads_proj["geometry"] = roads_proj.geometry.buffer(10)
     roads_buffered = roads_proj.to_crs(roads.crs)
-
-    # Spatial join: crash within buffered segment
+    # Spatial join: assign each crash to a road segment
     joined = gpd.sjoin(crashes_gdf, roads_buffered, how="left", predicate="within")
+    # Count crashes per segment
     crash_counts = joined.groupby("OGF_ID").size().rename("crash_count")
-    roads = roads.join(crash_counts, on="OGF_ID").fillna({"crash_count": 0})
+    # Add crash_count to roads
+    roads = roads.join(crash_counts, on="OGF_ID")
+    roads["crash_count"] = roads["crash_count"].fillna(0).astype(int)
     return roads
 
 

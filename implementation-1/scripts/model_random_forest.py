@@ -30,3 +30,7 @@ model.fit(X_train, y_train)
 y_pred = model.predict(X_test)
 print(f"Random Forest R^2: {r2_score(y_test, y_pred):.3f}")
 print(f"Random Forest RMSE: {mean_squared_error(y_test, y_pred, squared=False):.3f}")
+
+import joblib
+
+joblib.dump(model, "implementation-1/data/model_random_forest.joblib")

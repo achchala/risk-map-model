@@ -32,3 +32,7 @@ print(f"Poisson Regression R^2: {r2_score(y_test, y_pred):.3f}")
 print(
     f"Poisson Regression RMSE: {mean_squared_error(y_test, y_pred, squared=False):.3f}"
 )
+
+import joblib
+
+joblib.dump(model, "implementation-1/data/model_poisson.joblib")
