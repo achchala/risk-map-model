@@ -1,0 +1,138 @@
+//
+//  RiskService.swift
+//  RiskMapApp
+//
+//  service for fetching risk predictions from backend API
+//
+
+import Foundation
+import CoreLocation
+import Combine
+
+class RiskService: ObservableObject {
+    @Published var roadSegments: [RoadSegment] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    
+    // TODO: update with your backend API URL    
+    private let baseURL = "http://localhost:8000/api"
+    
+    // fetch risk predictions for region
+    func fetchRiskPredictions(for region: MKCoordinateRegion) async throws -> [RoadSegment] {
+        await MainActor.run {
+            self.isLoading = true
+        }
+        
+        do {
+            let urlString = "\(baseURL)/risk-predictions"
+            guard let url = URL(string: urlString) else {
+                await MainActor.run {
+                    self.isLoading = false
+                }
+                throw APIError.invalidURL
+            }
+            
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            
+            // send region bounds
+            let requestBody: [String: Any] = [
+                "north": region.center.latitude + region.span.latitudeDelta / 2,
+                "south": region.center.latitude - region.span.latitudeDelta / 2,
+                "east": region.center.longitude + region.span.longitudeDelta / 2,
+                "west": region.center.longitude - region.span.longitudeDelta / 2
+            ]
+            
+            request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+            
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                await MainActor.run {
+                    self.errorMessage = "Invalid response"
+                    self.isLoading = false
+                }
+                throw APIError.serverError("Invalid response")
+            }
+            
+            guard httpResponse.statusCode == 200 else {
+                await MainActor.run {
+                    self.errorMessage = "Status code: \(httpResponse.statusCode)"
+                    self.isLoading = false
+                }
+                throw APIError.serverError("Status code: \(httpResponse.statusCode)")
+            }
+            
+            let segments = try JSONDecoder().decode([RoadSegment].self, from: data)
+            
+            await MainActor.run {
+                self.roadSegments = segments
+                self.errorMessage = nil
+                self.isLoading = false
+            }
+            
+            return segments
+        } catch let error as DecodingError {
+            await MainActor.run {
+                self.errorMessage = "Failed to decode response: \(error.localizedDescription)"
+                self.isLoading = false
+            }
+            throw APIError.decodingError
+        } catch {
+            await MainActor.run {
+                self.errorMessage = error.localizedDescription
+                self.isLoading = false
+            }
+            throw error
+        }
+    }
+    
+    // MARK: - get risk prediction for location
+    func getRiskPrediction(for location: CLLocationCoordinate2D) async throws -> RiskPredictionResponse {
+        let urlString = "\(baseURL)/risk-prediction"
+        guard let url = URL(string: urlString) else {
+            throw APIError.invalidURL
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let requestBody: [String: Any] = [
+            "latitude": location.latitude,
+            "longitude": location.longitude
+        ]
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw APIError.serverError("Invalid response")
+        }
+        
+        return try JSONDecoder().decode(RiskPredictionResponse.self, from: data)
+    }
+    
+    // MARK: - get high risk roads
+    func getHighRiskRoads() -> [RoadSegment] {
+        return roadSegments.filter { $0.riskLevel == .high }
+            .sorted { $0.numTotalCrashes > $1.numTotalCrashes }
+    }
+}
+
+// mapkit import
+import MapKit
+
+extension MKCoordinateRegion {
+    // helper for creating region from bounds
+    static func toronto() -> MKCoordinateRegion {
+        MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 43.6532, longitude: -79.3832),
+            span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
+        )
+    }
+}
+
