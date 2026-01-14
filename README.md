@@ -19,6 +19,11 @@ risk-map-model/
 │   ├── maps/                      # Interactive risk maps (HTML)
 │   ├── models/                    # Trained model artifacts
 │   └── reports/                   # Analysis reports and data exports
+├── ios-app/                       # iOS app
+│   └── RiskMapApp/                # SwiftUI iOS application
+├── backend-api/                   # Flask API server for iOS app
+│   ├── app.py                     # API endpoints
+│   └── requirements.txt           # Python dependencies
 ├── run_risk_analysis.py           # Main pipeline script
 ├── config.py                      # Configuration settings
 └── requirements.txt               # Python dependencies
@@ -64,9 +69,35 @@ pip install -r requirements.txt
 - No weather integration
 - Based on crash frequency, not crash rate per vehicle
 
+## iOS App
+
+iOS app built with SwiftUI and MapKit.
+
+### Quick Start
+
+1. **Open in Xcode:**
+   ```bash
+   cd ios-app/RiskMapApp
+   open RiskMapApp.xcodeproj
+   ```
+
+2. **Set up Backend API:**
+   ```bash
+   cd backend-api
+   pip install -r requirements.txt
+   python app.py
+   ```
+
+3. **Update API endpoint** in `RiskMapApp/Services/RiskService.swift`
+
+4. **Build and run** in Xcode (Cmd+R)
+
+See `ios-app/README.md` and `ios-app/SETUP_GUIDE.md` for detailed instructions.
+
+
 ## Future Enhancements
 - Real-time updates
 - Weather integration
 - Traffic volume data
 - Temporal risk patterns
-- API deployment 
+- Route planning integration
