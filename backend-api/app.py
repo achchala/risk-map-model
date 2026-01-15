@@ -245,7 +245,7 @@ def _predict_segment_risk(segment, model_trainer):
 
         X = pd.DataFrame([feature_data])
 
-=        for col in model_trainer.feature_columns:
+        for col in model_trainer.feature_columns:
             if col not in X.columns:
                 X[col] = 0.0
 
