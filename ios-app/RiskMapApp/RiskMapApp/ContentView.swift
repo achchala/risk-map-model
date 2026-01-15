@@ -2,7 +2,7 @@
 //  ContentView.swift
 //  RiskMapApp
 //
-//  Main content view with tab navigation
+//  main content view with tab navigation
 //
 
 import SwiftUI
@@ -36,6 +36,7 @@ struct ContentView_Previews: PreviewProvider {
         ContentView()
     }
 }
+
 
 
 
