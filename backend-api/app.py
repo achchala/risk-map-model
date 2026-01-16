@@ -3,7 +3,7 @@ flask API server
 serves risk predictions from the trained model
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import numpy as np
 import pandas as pd
@@ -65,6 +65,471 @@ try:
     logging.info(f"Loaded {len(road_network)} road segments")
 except Exception as e:
     logging.warning(f"Could not load road network: {e}")
+
+
+@app.route("/", methods=["GET"])
+def root():
+    """Landing page with API info and viewer options"""
+    return Response("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Risk Map Model API</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .container {
+            max-width: 800px;
+            width: 100%;
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        
+        .options {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 40px 0;
+        }
+        
+        .option-card {
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 30px;
+            text-align: center;
+            transition: all 0.3s;
+            cursor: pointer;
+            text-decoration: none;
+            color: inherit;
+        }
+        
+        .option-card:hover {
+            border-color: #007AFF;
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,122,255,0.2);
+        }
+        
+        .option-card h2 {
+            color: #007AFF;
+            margin-bottom: 10px;
+            font-size: 1.5em;
+        }
+        
+        .option-card p {
+            color: #666;
+            line-height: 1.6;
+        }
+        
+        .icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+        }
+        
+        .api-info {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 25px;
+            margin-top: 30px;
+        }
+        
+        .api-info h3 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        
+        .endpoint {
+            background: white;
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin: 8px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #333;
+            border-left: 4px solid #007AFF;
+        }
+        
+        .badge {
+            display: inline-block;
+            background: #007AFF;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Risk Map Model API</h1>
+        <p class="subtitle">Road crash risk prediction API for Toronto</p>
+        
+        <div class="options">
+            <a href="/web" class="option-card">
+                <div class="icon">🌐</div>
+                <h2>Web Viewer</h2>
+                <p>View the risk map in your web browser. Perfect for Windows users and quick testing.</p>
+            </a>
+            
+            <a href="/api/health" class="option-card">
+                <div class="icon">📱</div>
+                <h2>iOS App</h2>
+                <p>For iOS development. Connect your iOS app to these API endpoints.</p>
+            </a>
+        </div>
+        
+        <div class="api-info">
+            <h3>API Endpoints</h3>
+            <div class="endpoint">GET <code>/api/health</code> <span class="badge">Health Check</span></div>
+            <div class="endpoint">POST <code>/api/risk-predictions</code> <span class="badge">Get predictions for region</span></div>
+            <div class="endpoint">POST <code>/api/risk-prediction</code> <span class="badge">Get prediction for location</span></div>
+        </div>
+    </div>
+</body>
+</html>
+""", mimetype='text/html')
+
+
+@app.route("/web", methods=["GET"])
+def web_demo():
+    """Web demo interface mimicking iOS app - for Windows browser testing"""
+    return Response("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Risk Map - Toronto</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            background: #000;
+        }
+        
+        #map-container {
+            width: 100%;
+            height: 100vh;
+            position: relative;
+        }
+        
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+        
+        .error-banner {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #DC143C;
+            color: white;
+            padding: 16px 24px;
+            border-radius: 12px;
+            z-index: 1000;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            display: none;
+        }
+        
+        .error-banner.show {
+            display: block;
+        }
+        
+        .error-banner h3 {
+            margin-bottom: 8px;
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        .error-banner p {
+            margin-bottom: 12px;
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        
+        .retry-button {
+            background: white;
+            color: #DC143C;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+        
+        .retry-button:hover {
+            opacity: 0.9;
+        }
+        
+        .loading-indicator {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px 30px;
+            border-radius: 12px;
+            z-index: 999;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            display: none;
+        }
+        
+        .loading-indicator.show {
+            display: block;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007AFF;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 12px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .bottom-nav {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: space-around;
+            padding: 8px 0 max(8px, env(safe-area-inset-bottom));
+            z-index: 1000;
+            box-shadow: 0 -2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .nav-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 4px 12px;
+            cursor: pointer;
+            text-decoration: none;
+            color: #8e8e93;
+            font-size: 10px;
+            transition: color 0.2s;
+        }
+        
+        .nav-item.active {
+            color: #007AFF;
+        }
+        
+        .nav-icon {
+            width: 24px;
+            height: 24px;
+            margin-bottom: 4px;
+            font-size: 22px;
+        }
+        
+        .map-label {
+            position: absolute;
+            bottom: 80px;
+            left: 12px;
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            z-index: 500;
+        }
+        
+        .leaflet-container {
+            background: #e5e5e5;
+        }
+    </style>
+</head>
+<body>
+    <div id="map-container">
+        <div id="map"></div>
+        <div class="map-label">Toronto</div>
+        <div class="loading-indicator" id="loading">
+            <div class="spinner"></div>
+            <div>Loading risk data...</div>
+        </div>
+        <div class="error-banner" id="errorBanner">
+            <h3>Error: The request timed out.</h3>
+            <p>Toronto</p>
+            <button class="retry-button" onclick="loadRiskData()">Retry</button>
+        </div>
+    </div>
+    
+    <div class="bottom-nav">
+        <div class="nav-item active">
+            <div class="nav-icon">🗺️</div>
+            <div>Map</div>
+        </div>
+        <div class="nav-item">
+            <div class="nav-icon">⚠️</div>
+            <div>High Risk</div>
+        </div>
+        <div class="nav-item">
+            <div class="nav-icon">⚙️</div>
+            <div>Settings</div>
+        </div>
+    </div>
+    
+    <script>
+        // Initialize map centered on Toronto
+        const map = L.map('map', {
+            zoomControl: true,
+            attributionControl: false
+        }).setView([43.6532, -79.3832], 12);
+        
+        // Add tile layer (Apple Maps style)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors',
+            maxZoom: 19
+        }).addTo(map);
+        
+        // Add attribution
+        L.control.attribution({
+            position: 'bottomright',
+            prefix: false
+        }).addTo(map);
+        
+        const riskColors = {
+            'low': '#2E8B57',
+            'medium': '#FFA500',
+            'high': '#DC143C'
+        };
+        
+        let roadPolylines = [];
+        
+        async function loadRiskData() {
+            const loadingEl = document.getElementById('loading');
+            const errorBanner = document.getElementById('errorBanner');
+            
+            loadingEl.classList.add('show');
+            errorBanner.classList.remove('show');
+            
+            try {
+                const bounds = map.getBounds();
+                const requestBody = {
+                    north: bounds.getNorth(),
+                    south: bounds.getSouth(),
+                    east: bounds.getEast(),
+                    west: bounds.getWest()
+                };
+                
+                const response = await fetch('/api/risk-predictions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody),
+                    signal: AbortSignal.timeout(30000) // 30 second timeout
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const segments = await response.json();
+                
+                // Clear existing polylines
+                roadPolylines.forEach(line => map.removeLayer(line));
+                roadPolylines = [];
+                
+                // Add road segments
+                segments.forEach(segment => {
+                    if (segment.coordinates && segment.coordinates.length > 0) {
+                        const latlngs = segment.coordinates.map(coord => [coord.latitude, coord.longitude]);
+                        const color = riskColors[segment.risk_label] || riskColors['low'];
+                        
+                        const polyline = L.polyline(latlngs, {
+                            color: color,
+                            weight: 4,
+                            opacity: 0.8
+                        }).addTo(map);
+                        
+                        roadPolylines.push(polyline);
+                    }
+                });
+                
+                loadingEl.classList.remove('show');
+            } catch (error) {
+                console.error('Error loading risk data:', error);
+                loadingEl.classList.remove('show');
+                errorBanner.classList.add('show');
+                
+                if (error.name === 'AbortError' || error.message.includes('timeout')) {
+                    errorBanner.querySelector('h3').textContent = 'Error: The request timed out.';
+                } else {
+                    errorBanner.querySelector('h3').textContent = `Error: ${error.message}`;
+                }
+            }
+        }
+        
+        // Load data when map moves
+        let moveTimeout;
+        map.on('moveend', () => {
+            clearTimeout(moveTimeout);
+            moveTimeout = setTimeout(() => {
+                loadRiskData();
+            }, 500);
+        });
+        
+        // Initial load
+        loadRiskData();
+    </script>
+</body>
+</html>
+""", mimetype='text/html')
 
 
 @app.route("/api/health", methods=["GET"])
@@ -195,15 +660,37 @@ def _extract_coordinates(geometry):
     """Extract coordinates from geometry for JSON serialization"""
     coords = []
     try:
-        if hasattr(geometry, "coords"):
-            for lon, lat in geometry.coords:
-                coords.append({"latitude": lat, "longitude": lon})
-        elif hasattr(geometry, "geoms"):
+        # Handle multi-part geometries (MultiLineString, MultiPoint, etc.)
+        # Check for 'geoms' attribute first to avoid trying .coords on multi-part geometries
+        if hasattr(geometry, "geoms") and geometry.geoms:
             for geom in geometry.geoms:
-                for lon, lat in geom.coords:
+                # Each sub-geometry should be a LineString, Point, etc.
+                if hasattr(geom, "coords"):
+                    for coord in geom.coords:
+                        if len(coord) >= 2:
+                            lon, lat = coord[0], coord[1]
+                            coords.append({"latitude": lat, "longitude": lon})
+        # Handle single-part geometries (LineString, Point, etc.)
+        elif hasattr(geometry, "coords"):
+            for coord in geometry.coords:
+                if len(coord) >= 2:
+                    lon, lat = coord[0], coord[1]
                     coords.append({"latitude": lat, "longitude": lon})
+        # Handle Polygon - get exterior coordinates
+        elif hasattr(geometry, "exterior"):
+            return _extract_coordinates(geometry.exterior)
+        # Handle Polygon with xy attribute
+        elif hasattr(geometry, "xy"):
+            x_coords, y_coords = geometry.xy
+            for lon, lat in zip(x_coords, y_coords):
+                coords.append({"latitude": lat, "longitude": lon})
+    except (AttributeError, TypeError, IndexError) as e:
+        # Suppress warnings for expected geometry structure differences
+        # These are handled by the code above, no need to log
+        pass
     except Exception as e:
-        logging.warning(f"Error extracting coordinates: {e}")
+        # Only log truly unexpected errors, and at debug level
+        logging.debug(f"Error extracting coordinates: {e}")
     return coords
 
 
