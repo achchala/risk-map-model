@@ -1,6 +1,6 @@
 """
-Flask API server
-Serves risk predictions from the trained model
+flask API server
+serves risk predictions from the trained model
 """
 
 from flask import Flask, request, jsonify
@@ -26,7 +26,7 @@ from src.feature_engineering.feature_creator import create_segment_features
 from src.feature_engineering.label_generator import generate_risk_labels
 
 app = Flask(__name__)
-CORS(app)  
+CORS(app)
 
 # initialize model trainer and load model
 MODEL_PATH = PROJECT_ROOT / "outputs" / "models" / "toronto_risk_model.joblib"
@@ -107,36 +107,34 @@ def get_risk_predictions():
         east = data.get("east")
         west = data.get("west")
 
-        # use pre-processed data if available 
+        # use pre-processed data if available
         if preprocessed_data is not None:
             bbox = box(west, south, east, north)
             segments_in_bbox = preprocessed_data[
                 preprocessed_data.geometry.intersects(bbox)
             ]
 
+            # limit to 500 segments to prevent timeout and reduce response size
+            # prioritize high-risk segments first
+            if len(segments_in_bbox) > 500:
+                # sort by risk level (high > medium > low) and take top 500
+                risk_priority = {"high": 3, "medium": 2, "low": 1}
+                segments_in_bbox = segments_in_bbox.copy()
+                segments_in_bbox["_risk_priority"] = segments_in_bbox.get(
+                    "risk_label", "low"
+                ).map(risk_priority)
+                segments_in_bbox = segments_in_bbox.sort_values(
+                    "_risk_priority", ascending=False
+                ).head(500)
+
             results = []
             for idx, segment in segments_in_bbox.iterrows():
                 # extract coordinates from geometry
                 coords = _extract_coordinates(segment.geometry)
 
-                # get risk prediction from pre-processed data
+                # use pre-processed risk prediction (already computed, no need to run model again)
                 risk_label = segment.get("risk_label", "low")
                 confidence = segment.get("confidence", 0.5)
-
-                # if model is available and segment has features, get fresh prediction with probabilities
-                if model_trainer and model_trainer.model is not None:
-                    try:
-                        prediction, probabilities, model_confidence = (
-                            _predict_segment_risk(segment, model_trainer)
-                        )
-                        if prediction is not None:
-                            risk_label = prediction
-                            confidence = model_confidence
-                    except Exception as e:
-                        logging.debug(
-                            f"Could not get model prediction for segment {idx}: {e}"
-                        )
-                        # fall back to pre-processed data
 
                 result = {
                     "id": str(segment.get("segment_id", idx)),
@@ -148,13 +146,14 @@ def get_risk_predictions():
                     "num_total_crashes": int(segment.get("num_total_crashes", 0)),
                     "num_ksi_crashes": int(segment.get("num_ksi_crashes", 0)),
                     "fatality_count": int(segment.get("fatality_count", 0)),
-                    "coordinates": coords[:50],  
+                    "coordinates": coords[:50],  # Limit coordinates to reduce payload
                 }
                 results.append(result)
 
+            logging.info(f"Returning {len(results)} segments for bbox")
             return jsonify(results)
 
-        # fallback: process on-demand 
+        # fallback: process on-demand
         elif road_network is not None:
             bbox = box(west, south, east, north)
             segments_in_bbox = road_network[
@@ -199,7 +198,7 @@ def _extract_coordinates(geometry):
         if hasattr(geometry, "coords"):
             for lon, lat in geometry.coords:
                 coords.append({"latitude": lat, "longitude": lon})
-        elif hasattr(geometry, "geoms"):  
+        elif hasattr(geometry, "geoms"):
             for geom in geometry.geoms:
                 for lon, lat in geom.coords:
                     coords.append({"latitude": lat, "longitude": lon})
@@ -261,7 +260,6 @@ def _predict_segment_risk(segment, model_trainer):
         risk_label = model_trainer.label_encoder.inverse_transform(
             [prediction_encoded]
         )[0]
-
 
         class_order = model_trainer.label_encoder.classes_
         probabilities = {
@@ -384,4 +382,4 @@ def get_risk_prediction():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=False)

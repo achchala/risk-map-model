@@ -25,21 +25,25 @@ struct MapView: View {
     
     var body: some View {
         ZStack {
-            Map(position: $cameraPosition) {
+            Map(position: $cameraPosition, interactionModes: [.pan, .zoom, .rotate, .pitch]) {
                 ForEach(riskService.roadSegments) { segment in
-                    Annotation(
-                        segment.linearName,
-                        coordinate: segment.centerCoordinate
-                    ) {
-                        RiskAnnotation(segment: segment)
-                            .onTapGesture {
-                                selectedSegment = segment
-                                showDetail = true
-                            }
+                    // draw road segments as colored polylines
+                    if !segment.coordinates.isEmpty {
+                        let coords = segment.coordinates.map { 
+                            CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                        }
+                        let segmentColor = Color(hex: segment.riskLevel.color)
+                        MapPolyline(coordinates: coords)
+                            .stroke(segmentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
                     }
                 }
             }
             .mapStyle(.standard)
+            .mapControls {
+                MapUserLocationButton()
+                MapCompass()
+                MapScaleView()
+            }
             .onAppear {
                 loadRiskData()
             }
@@ -87,7 +91,11 @@ struct MapView: View {
             do {
                 _ = try await riskService.fetchRiskPredictions(for: region)
             } catch {
-                print("Error loading risk data: \(error)")
+                let errorMessage = error.localizedDescription
+                print("Error loading risk data: \(errorMessage)")
+                await MainActor.run {
+                    riskService.errorMessage = errorMessage
+                }
             }
         }
     }

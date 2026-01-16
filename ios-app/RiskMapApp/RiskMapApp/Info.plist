@@ -52,6 +52,11 @@
 	<string>RiskMap needs your location to show nearby road risk information.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>RiskMap needs your location to show nearby road risk information.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>
 

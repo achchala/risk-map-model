@@ -14,8 +14,11 @@ class RiskService: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     
-    // TODO: update with your backend API URL    
+    // backend API URL - update this to your Mac's IP address when testing on device
+    // for iOS Simulator, use localhost. For physical device, use your Mac's IP
     private let baseURL = "http://localhost:8000/api"
+    // For Simulator: "http://localhost:8000/api"
+    // For Device: "http://10.10.11.47:8000/api" (update IP if needed)
     
     // fetch risk predictions for region
     func fetchRiskPredictions(for region: MKCoordinateRegion) async throws -> [RoadSegment] {
@@ -35,6 +38,7 @@ class RiskService: ObservableObject {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 30.0  // 30 second timeout
             
             // send region bounds
             let requestBody: [String: Any] = [
