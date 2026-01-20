@@ -16,6 +16,7 @@
 		A1000013 /* RiskListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000014 /* RiskListView.swift */; };
 		A1000015 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000016 /* SettingsView.swift */; };
 		A1000043 /* NavigationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000044 /* NavigationView.swift */; };
+		A1000045 /* RouteService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000046 /* RouteService.swift */; };
 		A1000017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000018 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -30,6 +31,7 @@
 		A1000014 /* RiskListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RiskListView.swift; sourceTree = "<group>"; };
 		A1000016 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1000044 /* NavigationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationView.swift; sourceTree = "<group>"; };
+		A1000046 /* RouteService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteService.swift; sourceTree = "<group>"; };
 		A1000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000019 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -87,6 +89,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000008 /* RiskService.swift */,
+				A1000046 /* RouteService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -176,6 +179,7 @@
 				A1000003 /* ContentView.swift in Sources */,
 				A1000005 /* RiskModels.swift in Sources */,
 				A1000007 /* RiskService.swift in Sources */,
+				A1000045 /* RouteService.swift in Sources */,
 				A1000009 /* MapView.swift in Sources */,
 				A1000043 /* NavigationView.swift in Sources */,
 				A1000011 /* RiskDetailView.swift in Sources */,

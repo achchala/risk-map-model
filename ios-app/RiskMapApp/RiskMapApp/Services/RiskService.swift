@@ -15,9 +15,9 @@ class RiskService: ObservableObject {
     @Published var errorMessage: String?
     
     // backend API URL - update this to your Mac's IP address when testing on device
-    // for iOS Simulator, use localhost. For physical device, use your Mac's IP
-    private let baseURL = "http://localhost:8000/api"
-    // For Simulator: "http://localhost:8000/api"
+    // for iOS Simulator, use 127.0.0.1 (IPv4) instead of localhost to avoid IPv6 issues
+    private let baseURL = "http://127.0.0.1:8000/api"
+    // For Simulator: "http://127.0.0.1:8000/api" (IPv4, more reliable)
     // For Device: "http://10.10.11.47:8000/api" (update IP if needed)
     
     // fetch risk predictions for region
