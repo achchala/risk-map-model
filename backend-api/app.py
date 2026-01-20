@@ -391,10 +391,154 @@ def web_demo():
         .leaflet-container {
             background: #e5e5e5;
         }
+        
+        .view-container {
+            display: none;
+            width: 100%;
+            height: calc(100vh - 60px);
+            overflow-y: auto;
+            background: #f5f5f5;
+            padding-bottom: 60px;
+        }
+        
+        .view-container.active {
+            display: block;
+        }
+        
+        .navigation-view {
+            padding: 20px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        .navigation-header {
+            margin-bottom: 24px;
+        }
+        
+        .navigation-header h1 {
+            font-size: 28px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+        
+        .navigation-header p {
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .route-inputs {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+        
+        .input-row {
+            display: flex;
+            align-items: center;
+            padding: 16px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .input-row:last-child {
+            border-bottom: none;
+        }
+        
+        .input-icon {
+            width: 24px;
+            height: 24px;
+            margin-right: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+        
+        .input-icon.start {
+            color: #34C759;
+        }
+        
+        .input-icon.end {
+            color: #FF3B30;
+        }
+        
+        .input-field {
+            flex: 1;
+            border: none;
+            outline: none;
+            font-size: 16px;
+            color: #333;
+            background: transparent;
+        }
+        
+        .input-field::placeholder {
+            color: #999;
+        }
+        
+        .swap-button {
+            background: #f5f5f5;
+            border: none;
+            padding: 8px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 8px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: background 0.2s;
+        }
+        
+        .swap-button:hover {
+            background: #e0e0e0;
+        }
+        
+        .action-buttons {
+            display: flex;
+            gap: 12px;
+            margin-top: 24px;
+        }
+        
+        .action-button {
+            flex: 1;
+            padding: 14px 24px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .action-button.primary {
+            background: #007AFF;
+            color: white;
+        }
+        
+        .action-button.primary:hover {
+            background: #0051D5;
+        }
+        
+        .action-button.secondary {
+            background: white;
+            color: #007AFF;
+            border: 1px solid #007AFF;
+        }
+        
+        .action-button.secondary:hover {
+            background: #f0f7ff;
+        }
+        
+        .action-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
-    <div id="map-container">
+    <div id="map-container" class="view-container active">
         <div id="map"></div>
         <div class="map-label">Toronto</div>
         <div class="loading-indicator" id="loading">
@@ -408,16 +552,60 @@ def web_demo():
         </div>
     </div>
     
+    <div id="high-risk-view" class="view-container">
+        <div style="padding: 20px; text-align: center; color: #666;">
+            <h2>High Risk Areas</h2>
+            <p>Coming soon...</p>
+        </div>
+    </div>
+    
+    <div id="settings-view" class="view-container">
+        <div style="padding: 20px; text-align: center; color: #666;">
+            <h2>Settings</h2>
+            <p>Coming soon...</p>
+        </div>
+    </div>
+    
+    <div id="navigation-view" class="view-container">
+        <div class="navigation-view">
+            <div class="navigation-header">
+                <h1>Navigation</h1>
+                <p>Enter your starting point and destination</p>
+            </div>
+            
+            <div class="route-inputs">
+                <div class="input-row">
+                    <div class="input-icon start">📍</div>
+                    <input type="text" id="start-point" class="input-field" placeholder="Starting point" />
+                </div>
+                <button class="swap-button" id="swap-button" title="Swap start and destination">⇅</button>
+                <div class="input-row">
+                    <div class="input-icon end">🎯</div>
+                    <input type="text" id="end-point" class="input-field" placeholder="Destination" />
+                </div>
+            </div>
+            
+            <div class="action-buttons">
+                <button class="action-button secondary" id="clear-button">Clear</button>
+                <button class="action-button primary" id="plan-route-button" disabled>Plan Route</button>
+            </div>
+        </div>
+    </div>
+    
     <div class="bottom-nav">
-        <div class="nav-item active">
+        <div class="nav-item active" data-view="map-container">
             <div class="nav-icon">🗺️</div>
             <div>Map</div>
         </div>
-        <div class="nav-item">
+        <div class="nav-item" data-view="high-risk-view">
             <div class="nav-icon">⚠️</div>
             <div>High Risk</div>
         </div>
-        <div class="nav-item">
+        <div class="nav-item" data-view="navigation-view">
+            <div class="nav-icon">🧭</div>
+            <div>Navigation</div>
+        </div>
+        <div class="nav-item" data-view="settings-view">
             <div class="nav-icon">⚙️</div>
             <div>Settings</div>
         </div>
@@ -526,6 +714,73 @@ def web_demo():
         
         // Initial load
         loadRiskData();
+        
+        // Tab navigation
+        const navItems = document.querySelectorAll('.nav-item');
+        const viewContainers = document.querySelectorAll('.view-container');
+        
+        navItems.forEach(item => {
+            item.addEventListener('click', () => {
+                const targetView = item.getAttribute('data-view');
+                
+                // Update active nav item
+                navItems.forEach(nav => nav.classList.remove('active'));
+                item.classList.add('active');
+                
+                // Show target view, hide others
+                viewContainers.forEach(view => {
+                    if (view.id === targetView) {
+                        view.classList.add('active');
+                    } else {
+                        view.classList.remove('active');
+                    }
+                });
+            });
+        });
+        
+        // Navigation view functionality
+        const startPointInput = document.getElementById('start-point');
+        const endPointInput = document.getElementById('end-point');
+        const swapButton = document.getElementById('swap-button');
+        const clearButton = document.getElementById('clear-button');
+        const planRouteButton = document.getElementById('plan-route-button');
+        
+        // Swap start and end points
+        swapButton.addEventListener('click', () => {
+            const startValue = startPointInput.value;
+            const endValue = endPointInput.value;
+            startPointInput.value = endValue;
+            endPointInput.value = startValue;
+            checkRouteButtonState();
+        });
+        
+        // Clear inputs
+        clearButton.addEventListener('click', () => {
+            startPointInput.value = '';
+            endPointInput.value = '';
+            checkRouteButtonState();
+        });
+        
+        // Check if route button should be enabled
+        function checkRouteButtonState() {
+            const hasStart = startPointInput.value.trim().length > 0;
+            const hasEnd = endPointInput.value.trim().length > 0;
+            planRouteButton.disabled = !(hasStart && hasEnd);
+        }
+        
+        // Enable/disable route button based on input
+        startPointInput.addEventListener('input', checkRouteButtonState);
+        endPointInput.addEventListener('input', checkRouteButtonState);
+        
+        // Plan route button (placeholder - will be implemented later)
+        planRouteButton.addEventListener('click', () => {
+            const start = startPointInput.value.trim();
+            const end = endPointInput.value.trim();
+            if (start && end) {
+                // Placeholder - route planning will be implemented later
+                alert('Route planning will be implemented soon.\\n\\nStart: ' + start + '\\nEnd: ' + end);
+            }
+        });
     </script>
 </body>
 </html>
