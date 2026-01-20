@@ -40,6 +40,7 @@ struct RouteNavigationView: View {
         ZStack {
             mapView
             searchAndControlsView
+            routeLegend
         }
         .onAppear {
             locationManager.requestLocation()
@@ -48,6 +49,52 @@ struct RouteNavigationView: View {
             // Dismiss suggestions when tapping on map
             showStartSuggestions = false
             showDestinationSuggestions = false
+        }
+    }
+    
+    // MARK: - Route Legend
+    @ViewBuilder
+    private var routeLegend: some View {
+        if routeService.saferRoute != nil || routeService.optimalRoute != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                if routeService.optimalRoute != nil {
+                    HStack(spacing: 8) {
+                        Rectangle()
+                            .fill(.orange)
+                            .frame(width: 20, height: 4)
+                        Text("Fastest Route")
+                            .font(.caption)
+                            .foregroundColor(.primary)
+                    }
+                }
+                if routeService.saferRoute != nil {
+                    HStack(spacing: 8) {
+                        Rectangle()
+                            .fill(.blue)
+                            .frame(width: 20, height: 4)
+                        Text("Safest Route")
+                            .font(.caption)
+                            .foregroundColor(.primary)
+                    }
+                }
+                if selectedRoute != nil {
+                    HStack(spacing: 8) {
+                        Rectangle()
+                            .fill(.purple)
+                            .frame(width: 20, height: 4)
+                        Text("Selected")
+                            .font(.caption)
+                            .foregroundColor(.primary)
+                    }
+                }
+            }
+            .padding(12)
+            .background(Color(.systemBackground).opacity(0.9))
+            .cornerRadius(10)
+            .shadow(radius: 5)
+            .padding(.top, 100)
+            .padding(.trailing, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
     }
     
@@ -107,32 +154,89 @@ struct RouteNavigationView: View {
                 .stroke(.gray.opacity(0.5), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [5, 5]))
         }
         
-        // Safer route
-        if let saferRoute = routeService.saferRoute {
-            let saferCoords = saferRoute.polyline.coordinates
-            if !saferCoords.isEmpty {
-                MapPolyline(coordinates: saferCoords)
-                    .stroke(.blue, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
-            }
-        }
-        
-        // Optimal route
+        // Optimal route (fastest) - show with orange color and white outline for visibility
         if let optimalRoute = routeService.optimalRoute {
-            let optimalCoords = optimalRoute.polyline.coordinates
+            // Use detailed coordinates from route steps for better accuracy
+            let optimalCoords = optimalRoute.detailedCoordinates.filter { coord in
+                coord.latitude.isFinite && coord.longitude.isFinite
+            }
             if !optimalCoords.isEmpty {
+                // White outline for visibility
                 MapPolyline(coordinates: optimalCoords)
-                    .stroke(.orange, style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
+                    .stroke(.white, style: StrokeStyle(lineWidth: 12, lineCap: .round, lineJoin: .round))
+                // Orange route on top
+                MapPolyline(coordinates: optimalCoords)
+                    .stroke(.orange, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
             }
         }
         
-        // Selected route (highlighted) - show selected route on top
-        if let selected = selectedRoute {
-            let selectedCoords = selected.polyline.coordinates
-            if !selectedCoords.isEmpty {
-                MapPolyline(coordinates: selectedCoords)
-                    .stroke(.purple, style: StrokeStyle(lineWidth: 10, lineCap: .round, lineJoin: .round))
+        // Safer route - show with blue color, make it more prominent if different
+        if let saferRoute = routeService.saferRoute {
+            // Use detailed coordinates from route steps for better accuracy
+            let saferCoords = saferRoute.detailedCoordinates.filter { coord in
+                coord.latitude.isFinite && coord.longitude.isFinite
+            }
+            if !saferCoords.isEmpty {
+                // Check if safer route is different from optimal route
+                let optimalCoords = routeService.optimalRoute?.detailedCoordinates ?? []
+                let isDifferent = optimalCoords.count != saferCoords.count ||
+                    !areRoutesSimilar(optimalCoords, saferCoords)
+                
+                if isDifferent {
+                    // Different route - make it very visible with white outline
+                    MapPolyline(coordinates: saferCoords)
+                        .stroke(.white, style: StrokeStyle(lineWidth: 14, lineCap: .round, lineJoin: .round))
+                    MapPolyline(coordinates: saferCoords)
+                        .stroke(.blue, style: StrokeStyle(lineWidth: 10, lineCap: .round, lineJoin: .round))
+                } else {
+                    // Same route - still show it but with dashed line to indicate it's the only option
+                    MapPolyline(coordinates: saferCoords)
+                        .stroke(.white, style: StrokeStyle(lineWidth: 12, lineCap: .round, lineJoin: .round))
+                    MapPolyline(coordinates: saferCoords)
+                        .stroke(.blue.opacity(0.8), style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round, dash: [15, 8]))
+                }
             }
         }
+        
+        // Selected route (highlighted) - show selected route on top with purple
+        if let selected = selectedRoute {
+            // Use detailed coordinates from route steps for better accuracy
+            let selectedCoords = selected.detailedCoordinates.filter { coord in
+                coord.latitude.isFinite && coord.longitude.isFinite
+            }
+            if !selectedCoords.isEmpty {
+                // White outline
+                MapPolyline(coordinates: selectedCoords)
+                    .stroke(.white, style: StrokeStyle(lineWidth: 16, lineCap: .round, lineJoin: .round))
+                // Purple highlight
+                MapPolyline(coordinates: selectedCoords)
+                    .stroke(.purple, style: StrokeStyle(lineWidth: 12, lineCap: .round, lineJoin: .round))
+            }
+        }
+    }
+    
+    // Helper to check if two routes are similar (within tolerance)
+    private func areRoutesSimilar(_ coords1: [CLLocationCoordinate2D], _ coords2: [CLLocationCoordinate2D]) -> Bool {
+        guard coords1.count > 0 && coords2.count > 0 else { return false }
+        
+        // If coordinate counts are very different, they're different routes
+        if abs(coords1.count - coords2.count) > coords1.count / 10 {
+            return false
+        }
+        
+        // Check if start and end points are similar
+        let start1 = coords1[0]
+        let end1 = coords1[coords1.count - 1]
+        let start2 = coords2[0]
+        let end2 = coords2[coords2.count - 1]
+        
+        let startDistance = CLLocation(latitude: start1.latitude, longitude: start1.longitude)
+            .distance(from: CLLocation(latitude: start2.latitude, longitude: start2.longitude))
+        let endDistance = CLLocation(latitude: end1.latitude, longitude: end1.longitude)
+            .distance(from: CLLocation(latitude: end2.latitude, longitude: end2.longitude))
+        
+        // If start/end are very close and route lengths are similar, consider them the same
+        return startDistance < 50 && endDistance < 50
     }
     
     // MARK: - Search and Controls View
@@ -176,8 +280,16 @@ struct RouteNavigationView: View {
                 TextField("Start location", text: $startAddress)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: startAddress) { oldValue, newValue in
-                        startSearchCompleter.searchQuery = newValue
-                        showStartSuggestions = !newValue.isEmpty && startLocation == nil
+                        // Debounce search to prevent timeout
+                        Task {
+                            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms delay
+                            if newValue == startAddress { // Only update if value hasn't changed
+                                await MainActor.run {
+                                    startSearchCompleter.searchQuery = newValue
+                                    showStartSuggestions = !newValue.isEmpty && startLocation == nil
+                                }
+                            }
+                        }
                     }
                     .onTapGesture {
                         showStartSuggestions = !startAddress.isEmpty && startLocation == nil
@@ -228,8 +340,16 @@ struct RouteNavigationView: View {
                 TextField("Destination", text: $destinationAddress)
                     .textFieldStyle(.roundedBorder)
                     .onChange(of: destinationAddress) { oldValue, newValue in
-                        destinationSearchCompleter.searchQuery = newValue
-                        showDestinationSuggestions = !newValue.isEmpty && destinationLocation == nil
+                        // Debounce search to prevent timeout
+                        Task {
+                            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms delay
+                            if newValue == destinationAddress { // Only update if value hasn't changed
+                                await MainActor.run {
+                                    destinationSearchCompleter.searchQuery = newValue
+                                    showDestinationSuggestions = !newValue.isEmpty && destinationLocation == nil
+                                }
+                            }
+                        }
                     }
                     .onTapGesture {
                         showDestinationSuggestions = !destinationAddress.isEmpty && destinationLocation == nil
@@ -463,12 +583,12 @@ struct RouteNavigationView: View {
                 print("📊 Routes calculated. Safer: \(routeService.saferRoute != nil), Optimal: \(routeService.optimalRoute != nil)")
                 
                 if let safer = routeService.saferRoute {
-                    let coords = safer.polyline.coordinates
-                    print("✅ Safer route: \(coords.count) coordinates, \(String(format: "%.1f", safer.distance/1000))km, \(Int(safer.estimatedTime/60))min")
+                    let coords = safer.detailedCoordinates
+                    print("✅ Safer route: \(coords.count) detailed coordinates, \(String(format: "%.1f", safer.distance/1000))km, \(Int(safer.estimatedTime/60))min")
                 }
                 if let optimal = routeService.optimalRoute {
-                    let coords = optimal.polyline.coordinates
-                    print("✅ Optimal route: \(coords.count) coordinates, \(String(format: "%.1f", optimal.distance/1000))km, \(Int(optimal.estimatedTime/60))min")
+                    let coords = optimal.detailedCoordinates
+                    print("✅ Optimal route: \(coords.count) detailed coordinates, \(String(format: "%.1f", optimal.distance/1000))km, \(Int(optimal.estimatedTime/60))min")
                 }
                 
                 if routeService.saferRoute != nil && routeService.optimalRoute != nil {
@@ -488,13 +608,30 @@ struct RouteNavigationView: View {
     
     private func updateCamera() {
         if let start = startLocation, let destination = destinationLocation {
+            // Validate coordinates are finite
+            guard start.latitude.isFinite && start.longitude.isFinite &&
+                  destination.latitude.isFinite && destination.longitude.isFinite else {
+                return
+            }
+            
+            let centerLat = (start.latitude + destination.latitude) / 2
+            let centerLon = (start.longitude + destination.longitude) / 2
+            
+            guard centerLat.isFinite && centerLon.isFinite else {
+                return
+            }
+            
             let center = CLLocationCoordinate2D(
-                latitude: (start.latitude + destination.latitude) / 2,
-                longitude: (start.longitude + destination.longitude) / 2
+                latitude: centerLat,
+                longitude: centerLon
             )
             
             let latDelta = abs(start.latitude - destination.latitude) * 1.5
             let lonDelta = abs(start.longitude - destination.longitude) * 1.5
+            
+            guard latDelta.isFinite && lonDelta.isFinite else {
+                return
+            }
             
             cameraPosition = .region(MKCoordinateRegion(
                 center: center,
@@ -504,6 +641,10 @@ struct RouteNavigationView: View {
                 )
             ))
         } else if let location = startLocation ?? destinationLocation {
+            // Validate location coordinates
+            guard location.latitude.isFinite && location.longitude.isFinite else {
+                return
+            }
             cameraPosition = .region(MKCoordinateRegion(
                 center: location,
                 span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
@@ -516,29 +657,53 @@ struct RouteNavigationView: View {
             return
         }
         
-        let saferCoords = safer.polyline.coordinates
-        let optimalCoords = optimal.polyline.coordinates
+        // Use detailed coordinates for better camera positioning
+        let saferCoords = safer.detailedCoordinates
+        let optimalCoords = optimal.detailedCoordinates
         let allCoords = saferCoords + optimalCoords
-        guard !allCoords.isEmpty else { return }
         
-        let latitudes = allCoords.map { $0.latitude }
-        let longitudes = allCoords.map { $0.longitude }
+        // Filter out invalid coordinates (NaN or infinite)
+        let validCoords = allCoords.filter { coord in
+            coord.latitude.isFinite && coord.longitude.isFinite &&
+            coord.latitude >= -90 && coord.latitude <= 90 &&
+            coord.longitude >= -180 && coord.longitude <= 180
+        }
+        
+        guard !validCoords.isEmpty else { return }
+        
+        let latitudes = validCoords.map { $0.latitude }
+        let longitudes = validCoords.map { $0.longitude }
         
         guard let minLat = latitudes.min(),
               let maxLat = latitudes.max(),
               let minLon = longitudes.min(),
-              let maxLon = longitudes.max() else {
+              let maxLon = longitudes.max(),
+              minLat.isFinite && maxLat.isFinite && minLon.isFinite && maxLon.isFinite else {
+            return
+        }
+        
+        let centerLat = (minLat + maxLat) / 2.0
+        let centerLon = (minLon + maxLon) / 2.0
+        
+        guard centerLat.isFinite && centerLon.isFinite else {
             return
         }
         
         let center = CLLocationCoordinate2D(
-            latitude: (minLat + maxLat) / 2.0,
-            longitude: (minLon + maxLon) / 2.0
+            latitude: centerLat,
+            longitude: centerLon
         )
         
+        let latDelta = max((maxLat - minLat) * 1.3, 0.01)
+        let lonDelta = max((maxLon - minLon) * 1.3, 0.01)
+        
+        guard latDelta.isFinite && lonDelta.isFinite else {
+            return
+        }
+        
         let span = MKCoordinateSpan(
-            latitudeDelta: (maxLat - minLat) * 1.3,
-            longitudeDelta: (maxLon - minLon) * 1.3
+            latitudeDelta: latDelta,
+            longitudeDelta: lonDelta
         )
         
         cameraPosition = .region(MKCoordinateRegion(center: center, span: span))
@@ -574,105 +739,179 @@ struct RouteComparisonCard: View {
     let optimalRoute: Route
     @Binding var selectedRoute: Route?
     let onExportToGoogleMaps: () -> Void
+    @State private var isExpanded = true
     
     private var comparison: RouteComparison {
         RouteComparison(saferRoute: saferRoute, optimalRoute: optimalRoute)
     }
     
+    private var routesAreSame: Bool {
+        // Check if routes are essentially the same
+        let saferCoords = saferRoute.polyline.coordinates
+        let optimalCoords = optimalRoute.polyline.coordinates
+        
+        // If coordinate counts are very similar and distances are very close, they're likely the same
+        let coordDiff = abs(saferCoords.count - optimalCoords.count)
+        let distanceDiff = abs(saferRoute.distance - optimalRoute.distance)
+        
+        return coordDiff < max(saferCoords.count, optimalCoords.count) / 10 &&
+               distanceDiff < 100 // Less than 100m difference
+    }
+    
     var body: some View {
-        VStack(spacing: 16) {
-            // Header
-            HStack {
-                Text("Route Options")
-                    .font(.headline)
-                Spacer()
-            }
-            .padding(.horizontal)
-            .padding(.top)
-            
-            // Safer Route Card
-            RouteOptionCard(
-                route: saferRoute,
-                title: "Safest Route",
-                subtitle: saferRoute.safetyExplanation(comparedTo: optimalRoute),
-                color: .blue,
-                isSelected: selectedRoute?.id == saferRoute.id
-            ) {
-                selectedRoute = saferRoute
-            }
-            
-            // Optimal Route Card
-            RouteOptionCard(
-                route: optimalRoute,
-                title: "Fastest Route",
-                subtitle: "Shortest travel time",
-                color: .orange,
-                isSelected: selectedRoute?.id == optimalRoute.id
-            ) {
-                selectedRoute = optimalRoute
-            }
-            
-            // Detailed Explanation
-            VStack(alignment: .leading, spacing: 12) {
+        VStack(spacing: 0) {
+            // Collapsible Header
+            Button(action: {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    isExpanded.toggle()
+                }
+            }) {
                 HStack {
-                    Image(systemName: "info.circle.fill")
-                        .foregroundColor(.blue)
-                    Text("Why This Route?")
+                    Text("Route Options")
                         .font(.headline)
-                }
-                
-                Text(comparison.detailedExplanation)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding()
-            .background(Color(.systemGray6))
-            .cornerRadius(10)
-            .padding(.horizontal)
-            
-            // Comparison Info
-            VStack(spacing: 8) {
-                HStack {
-                    Image(systemName: "clock")
-                    Text("Time difference: \(formatTimeDifference(comparison.timeDifference))")
-                        .font(.subheadline)
-                        .foregroundColor(comparison.saferRouteSlower ? .orange : .green)
-                }
-                
-                HStack {
-                    Image(systemName: "shield.checkered")
-                    Text("Safety improvement: \(comparison.safetyImprovement)")
-                        .font(.subheadline)
-                        .foregroundColor(.blue)
-                }
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .background(Color(.systemGray6))
-            .cornerRadius(10)
-            .padding(.horizontal)
-            
-            // Export to Google Maps button
-            if selectedRoute != nil {
-                Button(action: onExportToGoogleMaps) {
-                    HStack {
-                        Image(systemName: "map.fill")
-                        Text("Open in Google Maps")
+                    Spacer()
+                    
+                    // Quick summary when collapsed
+                    if !isExpanded {
+                        HStack(spacing: 12) {
+                            if selectedRoute?.id == saferRoute.id {
+                                Label(formatTime(saferRoute.estimatedTime), systemImage: "shield.checkered")
+                                    .font(.caption)
+                                    .foregroundColor(.blue)
+                            } else if selectedRoute?.id == optimalRoute.id {
+                                Label(formatTime(optimalRoute.estimatedTime), systemImage: "clock")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                        }
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.green)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+                    
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.up")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
                 .padding(.horizontal)
-                .padding(.bottom)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            
+            // Expandable content
+            if isExpanded {
+                VStack(spacing: 16) {
+                    // Show warning if routes are the same
+                    if routesAreSame {
+                        HStack {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundColor(.orange)
+                            Text("Only one route available - safest and fastest routes are the same")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                        .background(Color.orange.opacity(0.1))
+                        .cornerRadius(8)
+                        .padding(.horizontal)
+                    }
+                    
+                    // Safer Route Card
+                    RouteOptionCard(
+                        route: saferRoute,
+                        title: "Safest Route",
+                        subtitle: routesAreSame ? "Same as fastest route (only one option available)" : saferRoute.safetyExplanation(comparedTo: optimalRoute),
+                        color: .blue,
+                        isSelected: selectedRoute?.id == saferRoute.id
+                    ) {
+                        selectedRoute = saferRoute
+                    }
+                    
+                    // Optimal Route Card
+                    RouteOptionCard(
+                        route: optimalRoute,
+                        title: "Fastest Route",
+                        subtitle: routesAreSame ? "Same as safest route (only one option available)" : "Shortest travel time",
+                        color: .orange,
+                        isSelected: selectedRoute?.id == optimalRoute.id
+                    ) {
+                        selectedRoute = optimalRoute
+                    }
+                    
+                    // Detailed Explanation
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundColor(.blue)
+                            Text("Why This Route?")
+                                .font(.headline)
+                        }
+                        
+                        Text(comparison.detailedExplanation)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding()
+                    .background(Color(.systemGray6))
+                    .cornerRadius(10)
+                    .padding(.horizontal)
+                    
+                    // Comparison Info
+                    VStack(spacing: 8) {
+                        HStack {
+                            Image(systemName: "clock")
+                            Text("Time difference: \(formatTimeDifference(comparison.timeDifference))")
+                                .font(.subheadline)
+                                .foregroundColor(comparison.saferRouteSlower ? .orange : .green)
+                        }
+                        
+                        HStack {
+                            Image(systemName: "shield.checkered")
+                            Text("Safety improvement: \(comparison.safetyImprovement)")
+                                .font(.subheadline)
+                                .foregroundColor(.blue)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(Color(.systemGray6))
+                    .cornerRadius(10)
+                    .padding(.horizontal)
+                    
+                    // Export to Google Maps button
+                    if selectedRoute != nil {
+                        Button(action: onExportToGoogleMaps) {
+                            HStack {
+                                Image(systemName: "map.fill")
+                                Text("Open in Google Maps")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.green)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                        .padding(.horizontal)
+                        .padding(.bottom)
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
         .background(Color(.systemBackground))
         .cornerRadius(16, corners: [.topLeft, .topRight])
         .shadow(radius: 10)
+    }
+    
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        if minutes < 60 {
+            return "\(minutes) min"
+        } else {
+            let hours = minutes / 60
+            let mins = minutes % 60
+            return "\(hours)h \(mins)m"
+        }
     }
     
     private func formatTimeDifference(_ seconds: TimeInterval) -> String {
@@ -938,6 +1177,18 @@ class LocationSearchCompleter: NSObject, ObservableObject, MKLocalSearchComplete
     }
     
     func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
-        print("Search completer error: \(error.localizedDescription)")
+        // MKErrorDomain error 5 is MKErrorLoadingThrottled - too many requests
+        // This is expected and can be ignored - results will update when throttling ends
+        if let mkError = error as? MKError {
+            switch mkError.code {
+            case .loadingThrottled:
+                // Throttled - this is normal, just ignore
+                break
+            default:
+                print("Search completer error: \(error.localizedDescription)")
+            }
+        } else {
+            print("Search completer error: \(error.localizedDescription)")
+        }
     }
 }

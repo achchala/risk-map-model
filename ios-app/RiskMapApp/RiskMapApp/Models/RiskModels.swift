@@ -117,6 +117,11 @@ struct Route: Identifiable {
         route.steps
     }
     
+    /// Get detailed coordinates following the actual road path
+    var detailedCoordinates: [CLLocationCoordinate2D] {
+        route.detailedCoordinates
+    }
+    
     // Generate explanation for why this route is safer
     func safetyExplanation(comparedTo optimalRoute: Route?) -> String {
         var reasons: [String] = []

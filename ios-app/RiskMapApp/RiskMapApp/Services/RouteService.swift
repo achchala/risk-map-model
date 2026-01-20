@@ -119,24 +119,53 @@ class RouteService: ObservableObject {
             throw RouteError.noRouteFound
         }
         
-        // If we only have one route, use it
+        // If we only have one route, we can't find a safer alternative
+        // In this case, we'll still analyze it but note that it's the only option
         if routes.count == 1 {
+            print("⚠️ Only one route available - safer route will be same as optimal")
             return routes[0]
         }
         
-        // Get risk segments for all routes (limit to first 3 routes for performance)
+        print("📍 Found \(routes.count) alternate routes, analyzing for safety...")
+        
+        // Get risk segments for all routes (limit to first 5 routes for performance)
         var routeRiskScores: [(route: MKRoute, score: Double)] = []
         
-        // Use the first route's region to fetch risk data once (more efficient)
-        let firstRouteRegion = createRegionForRoute(routes[0])
+        // Create a combined region covering all routes for risk data fetch
+        var allCoords: [CLLocationCoordinate2D] = []
+        for route in routes.prefix(5) {
+            allCoords.append(contentsOf: route.polyline.coordinates)
+        }
+        
+        guard !allCoords.isEmpty else {
+            return routes[0]
+        }
+        
+        // Create region covering all routes
+        let minLat = allCoords.map { $0.latitude }.min()!
+        let maxLat = allCoords.map { $0.latitude }.max()!
+        let minLon = allCoords.map { $0.longitude }.min()!
+        let maxLon = allCoords.map { $0.longitude }.max()!
+        
+        let combinedRegion = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(
+                latitude: (minLat + maxLat) / 2,
+                longitude: (minLon + maxLon) / 2
+            ),
+            span: MKCoordinateSpan(
+                latitudeDelta: (maxLat - minLat) * 1.5,
+                longitudeDelta: (maxLon - minLon) * 1.5
+            )
+        )
+        
         let riskSegments: [RoadSegment]
         
         do {
-            riskSegments = try await riskService.fetchRiskPredictions(for: firstRouteRegion)
+            riskSegments = try await riskService.fetchRiskPredictions(for: combinedRegion)
         } catch {
-            // If risk data fetch fails, just return the first route
-            print("Warning: Could not fetch risk data, using first route: \(error.localizedDescription)")
-            return routes[0]
+            // If risk data fetch fails, return the second route (different from optimal)
+            print("Warning: Could not fetch risk data, using second route: \(error.localizedDescription)")
+            return routes.count > 1 ? routes[1] : routes[0]
         }
         
         // Limit risk segments to prevent memory issues
@@ -144,15 +173,19 @@ class RouteService: ObservableObject {
         let limitedRiskSegments = Array(riskSegments.prefix(maxRiskSegments))
         
         // Calculate risk scores for each route using the same risk data
-        for route in routes.prefix(3) { // Limit to 3 routes for performance
+        for (index, route) in routes.prefix(5).enumerated() {
             let riskScore = calculateRouteRiskScore(route: route, riskSegments: limitedRiskSegments)
             routeRiskScores.append((route: route, score: riskScore))
+            print("  Route \(index + 1): Risk score = \(String(format: "%.2f", riskScore)), Distance = \(String(format: "%.1f", route.distance/1000))km, Time = \(Int(route.expectedTravelTime/60))min")
         }
         
         // Sort by risk score (lower is better) and return the safest route
         routeRiskScores.sort { $0.score < $1.score }
         
-        return routeRiskScores.first?.route ?? routes[0]
+        let safestRoute = routeRiskScores.first?.route ?? routes[0]
+        print("✅ Selected safest route with risk score: \(String(format: "%.2f", routeRiskScores.first?.score ?? 0))")
+        
+        return safestRoute
     }
     
     // Calculate risk score for a route (lower is better)
@@ -276,9 +309,23 @@ class RouteService: ObservableObject {
             longitude: (minLon + maxLon) / 2
         )
         
+        // Ensure span is not zero or NaN
+        let latDelta = max((maxLat - minLat) * 1.5, 0.01)
+        let lonDelta = max((maxLon - minLon) * 1.5, 0.01)
+        
+        // Validate center coordinates
+        guard center.latitude.isFinite && center.longitude.isFinite,
+              latDelta.isFinite && lonDelta.isFinite else {
+            // Fallback to default region if invalid
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 43.6532, longitude: -79.3832),
+                span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
+            )
+        }
+        
         let span = MKCoordinateSpan(
-            latitudeDelta: (maxLat - minLat) * 1.5,
-            longitudeDelta: (maxLon - minLon) * 1.5
+            latitudeDelta: latDelta,
+            longitudeDelta: lonDelta
         )
         
         return MKCoordinateRegion(center: center, span: span)
@@ -305,7 +352,6 @@ class RouteService: ObservableObject {
     private func samplePointsEvery(coordinates: [CLLocationCoordinate2D], distance: CLLocationDistance, maxPoints: Int) -> [CLLocationCoordinate2D] {
         var sampledPoints: [CLLocationCoordinate2D] = []
         var accumulatedDistance: CLLocationDistance = 0
-        var lastSampledIndex = 0
         
         for i in 0..<coordinates.count - 1 {
             let start = coordinates[i]
@@ -314,12 +360,26 @@ class RouteService: ObservableObject {
             let segmentDistance = CLLocation(latitude: start.latitude, longitude: start.longitude)
                 .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
             
+            // Skip zero-length segments to avoid division by zero
+            guard segmentDistance > 0.001 else {
+                accumulatedDistance += segmentDistance
+                continue
+            }
+            
             // Sample points along this segment
             var segmentAccumulated: CLLocationDistance = 0
             while segmentAccumulated + distance <= segmentDistance && sampledPoints.count < maxPoints {
                 let ratio = (segmentAccumulated + distance) / segmentDistance
+                // Ensure ratio is valid (not NaN)
+                guard ratio.isFinite && ratio >= 0 && ratio <= 1 else {
+                    break
+                }
                 let lat = start.latitude + (end.latitude - start.latitude) * ratio
                 let lon = start.longitude + (end.longitude - start.longitude) * ratio
+                // Validate coordinates are not NaN
+                guard lat.isFinite && lon.isFinite else {
+                    break
+                }
                 sampledPoints.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
                 segmentAccumulated += distance
                 accumulatedDistance += distance
@@ -402,14 +462,57 @@ enum RouteError: LocalizedError {
 extension MKPolyline {
     var coordinates: [CLLocationCoordinate2D] {
         var coords: [CLLocationCoordinate2D] = []
-        let pointCount = pointCount
+        let pointCount = self.pointCount
+        guard pointCount > 0 else { return coords }
+        
         let points = self.points()
         
         for i in 0..<pointCount {
             let point = points[i]
-            coords.append(point.coordinate)
+            let coord = point.coordinate
+            // Filter out invalid coordinates (NaN or infinite)
+            if coord.latitude.isFinite && coord.longitude.isFinite &&
+               coord.latitude >= -90 && coord.latitude <= 90 &&
+               coord.longitude >= -180 && coord.longitude <= 180 {
+                coords.append(coord)
+            }
         }
         
         return coords
+    }
+}
+
+// MARK: - MKRoute Extension for detailed coordinates
+extension MKRoute {
+    /// Get detailed coordinates from route steps (more accurate than polyline alone)
+    var detailedCoordinates: [CLLocationCoordinate2D] {
+        var allCoords: [CLLocationCoordinate2D] = []
+        
+        // Use polyline coordinates as base
+        let polylineCoords = self.polyline.coordinates
+        
+        // If we have steps, use them for more detail
+        if !self.steps.isEmpty {
+            for step in self.steps {
+                let stepCoords = step.polyline.coordinates
+                // Add step coordinates, avoiding duplicates
+                for coord in stepCoords {
+                    if allCoords.isEmpty || 
+                       !allCoords.contains(where: { 
+                           abs($0.latitude - coord.latitude) < 0.00001 && 
+                           abs($0.longitude - coord.longitude) < 0.00001 
+                       }) {
+                        allCoords.append(coord)
+                    }
+                }
+            }
+        }
+        
+        // If we didn't get enough coordinates from steps, use polyline
+        if allCoords.count < 10 {
+            return polylineCoords
+        }
+        
+        return allCoords
     }
 }
