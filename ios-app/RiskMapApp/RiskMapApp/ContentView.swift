@@ -22,6 +22,11 @@ struct ContentView: View {
                     Label("High Risk", systemImage: "exclamationmark.triangle")
                 }
             
+            RouteNavigationView()
+                .tabItem {
+                    Label("Navigation", systemImage: "location.north.circle")
+                }
+            
             SettingsView()
                 .tabItem {
                     Label("Settings", systemImage: "gear")
