@@ -17,6 +17,11 @@ struct ContentView: View {
                     Label("Map", systemImage: "map")
                 }
             
+            DashboardView()
+                .tabItem {
+                    Label("Dashboard", systemImage: "chart.pie")
+                }
+            
             RiskListView()
                 .tabItem {
                     Label("High Risk", systemImage: "exclamationmark.triangle")

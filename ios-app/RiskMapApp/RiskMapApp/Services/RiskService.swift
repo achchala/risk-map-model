@@ -125,6 +125,28 @@ class RiskService: ObservableObject {
         return roadSegments.filter { $0.riskLevel == .high }
             .sorted { $0.numTotalCrashes > $1.numTotalCrashes }
     }
+    
+    // MARK: - get dashboard statistics
+    func fetchDashboardStats() async throws -> DashboardStats {
+        let urlString = "\(baseURL)/dashboard-stats"
+        guard let url = URL(string: urlString) else {
+            throw APIError.invalidURL
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30.0
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw APIError.serverError("Invalid response")
+        }
+        
+        return try JSONDecoder().decode(DashboardStats.self, from: data)
+    }
 }
 
 // mapkit import

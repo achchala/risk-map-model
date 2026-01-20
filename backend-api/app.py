@@ -380,6 +380,76 @@ def get_risk_prediction():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/dashboard-stats", methods=["GET"])
+def get_dashboard_stats():
+    """
+    Get dashboard statistics for risk analysis
+    
+    Returns:
+        JSON with risk distribution counts, percentages, and total segments
+    """
+    try:
+        # Use pre-processed data if available
+        if preprocessed_data is not None:
+            # Calculate risk distribution
+            risk_counts = preprocessed_data['risk_label'].value_counts()
+            
+            low_count = int(risk_counts.get('low', 0))
+            medium_count = int(risk_counts.get('medium', 0))
+            high_count = int(risk_counts.get('high', 0))
+            total_segments = len(preprocessed_data)
+            
+            # Calculate percentages
+            low_percentage = (low_count / total_segments) * 100 if total_segments > 0 else 0
+            medium_percentage = (medium_count / total_segments) * 100 if total_segments > 0 else 0
+            high_percentage = (high_count / total_segments) * 100 if total_segments > 0 else 0
+            
+            stats = {
+                "risk_distribution": {
+                    "low": low_count,
+                    "medium": medium_count,
+                    "high": high_count
+                },
+                "risk_percentages": {
+                    "low": round(low_percentage, 1),
+                    "medium": round(medium_percentage, 1),
+                    "high": round(high_percentage, 1)
+                },
+                "total_segments": total_segments
+            }
+            
+            return jsonify(stats)
+        
+        # Fallback: use road network if available
+        elif road_network is not None:
+            # Return default stats (all low risk) if we don't have preprocessed data
+            total_segments = len(road_network)
+            stats = {
+                "risk_distribution": {
+                    "low": total_segments,
+                    "medium": 0,
+                    "high": 0
+                },
+                "risk_percentages": {
+                    "low": 100.0,
+                    "medium": 0.0,
+                    "high": 0.0
+                },
+                "total_segments": total_segments
+            }
+            return jsonify(stats)
+        else:
+            return jsonify({"error": "No data available"}), 500
+            
+    except Exception as e:
+        logging.error(f"Error in dashboard stats: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=False)
+    # Disable debug mode and threading to avoid memory issues with C extensions
+    # (geopandas, shapely, sklearn can cause double-free errors with Flask's debug mode)
+    app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False, threaded=False)

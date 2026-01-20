@@ -85,6 +85,31 @@ struct RiskPredictionResponse: Codable {
     }
 }
 
+// MARK: - Dashboard Statistics Model
+struct DashboardStats: Codable {
+    let riskDistribution: RiskDistribution
+    let riskPercentages: RiskPercentages
+    let totalSegments: Int
+    
+    struct RiskDistribution: Codable {
+        let low: Int
+        let medium: Int
+        let high: Int
+    }
+    
+    struct RiskPercentages: Codable {
+        let low: Double
+        let medium: Double
+        let high: Double
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case riskDistribution = "risk_distribution"
+        case riskPercentages = "risk_percentages"
+        case totalSegments = "total_segments"
+    }
+}
+
 // API error
 enum APIError: Error, LocalizedError {
     case invalidURL
