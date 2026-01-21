@@ -648,12 +648,13 @@ class RiskMapper:
         </div>
         """
     
-    def export_data_for_qgis(self, risk_data: gpd.GeoDataFrame) -> dict:
+    def export_data_for_qgis(self, risk_data: gpd.GeoDataFrame, model_trainer=None) -> dict:
         """
         Export data in formats suitable for QGIS
         
         Args:
             risk_data: GeoDataFrame with risk predictions
+            model_trainer: Optional ModelTrainer instance to calculate confidence scores
             
         Returns:
             Dictionary with paths to exported files
@@ -662,12 +663,47 @@ class RiskMapper:
         
         exported_files = {}
         
+        # Calculate confidence scores if model is provided
+        risk_data_export = risk_data.copy()
+        if model_trainer is not None and model_trainer.model is not None:
+            logger.info("Calculating confidence scores for all segments...")
+            try:
+                # Prepare features for all segments
+                X, _ = model_trainer.prepare_features(risk_data_export)
+                
+                # Scale features
+                X_scaled = model_trainer.scaler.transform(X)
+                
+                # Get predictions and probabilities
+                probabilities = model_trainer.model.predict_proba(X_scaled)
+                
+                # Calculate confidence as max probability
+                confidence_scores = np.max(probabilities, axis=1)
+                
+                # Add confidence to the dataframe
+                risk_data_export['confidence'] = confidence_scores
+                
+                logger.info(f"Added confidence scores. Mean confidence: {confidence_scores.mean():.3f}")
+            except Exception as e:
+                logger.warning(f"Could not calculate confidence scores: {e}. Using default 0.5")
+                risk_data_export['confidence'] = 0.5
+        else:
+            logger.warning("No model provided. Confidence scores will default to 0.5")
+            risk_data_export['confidence'] = 0.5
+        
         # Export full dataset as GeoJSON
         maps_dir = self.output_dir / "maps"
         maps_dir.mkdir(exist_ok=True)
         geojson_file = maps_dir / "toronto_road_risk.geojson"
-        risk_data.to_file(geojson_file, driver='GeoJSON')
+        risk_data_export.to_file(geojson_file, driver='GeoJSON')
         exported_files['geojson'] = str(geojson_file)
+        
+        # Also export to reports directory (for backend API)
+        reports_dir = self.output_dir / "reports"
+        reports_dir.mkdir(exist_ok=True)
+        reports_geojson = reports_dir / "toronto_road_risk.geojson"
+        risk_data_export.to_file(reports_geojson, driver='GeoJSON')
+        logger.info(f"Also exported to {reports_geojson} for backend API")
         
         # Export high-risk segments only
         high_risk = risk_data[risk_data['risk_label'] == 'high']

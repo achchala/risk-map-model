@@ -620,11 +620,25 @@ def data_verification():
         total_segments = len(data_source)
         segments_with_crashes = len(data_source[data_source.get("num_total_crashes", 0) > 0]) if "num_total_crashes" in data_source.columns else 0
         segments_with_ksi = len(data_source[data_source.get("num_ksi_crashes", 0) > 0]) if "num_ksi_crashes" in data_source.columns else 0
+        segments_with_fatalities = len(data_source[data_source.get("fatality_count", 0) > 0]) if "fatality_count" in data_source.columns else 0
         
         # Calculate totals
         total_crashes = int(data_source.get("num_total_crashes", 0).sum()) if "num_total_crashes" in data_source.columns else 0
         total_ksi = int(data_source.get("num_ksi_crashes", 0).sum()) if "num_ksi_crashes" in data_source.columns else 0
         total_fatalities = int(data_source.get("fatality_count", 0).sum()) if "fatality_count" in data_source.columns else 0
+        
+        # Check if fatality counts are likely accurate
+        # Based on the diagnostic, we expect:
+        # - Collision data: 591 records with non-zero fatalities
+        # - KSI data: 870 records with non-zero fatalities  
+        # Total should be in the hundreds, not zero
+        fatality_accuracy = {
+            "total_fatalities_in_data": total_fatalities,
+            "segments_with_fatalities": segments_with_fatalities,
+            "expected_range": "Hundreds to thousands (based on 591 + 870 raw records)",
+            "likely_accurate": total_fatalities > 100,  # Reasonable threshold
+            "warning": "If total_fatalities is 0 or very low (<50), the data needs to be regenerated with the fixed fatality counting logic."
+        }
         
         # Find segments where KSI > Total crashes (data inconsistency)
         inconsistencies = []
@@ -668,8 +682,10 @@ def data_verification():
                 "total_crashes": total_crashes,
                 "total_ksi_crashes": total_ksi,
                 "total_fatalities": total_fatalities,
+                "segments_with_fatalities": segments_with_fatalities,
                 "ksi_ratio": round(total_ksi / total_crashes * 100, 2) if total_crashes > 0 else 0,
             },
+            "fatality_accuracy_check": fatality_accuracy,
             "data_structure_explanation": {
                 "total_crashes_source": "Count of records from collision dataset (all traffic collisions)",
                 "ksi_crashes_source": "Count of records from KSI dataset (crashes with killed/seriously injured persons)",
@@ -845,13 +861,29 @@ def get_all_segments():
                 except:
                     segment_length = 0
             
+            # Calculate confidence if missing and model is available
+            confidence = segment.get("confidence", None)
+            if (confidence is None or pd.isna(confidence) or confidence == 0.5) and model_trainer is not None and model_trainer.model is not None:
+                try:
+                    # Try to get confidence from model prediction
+                    _, _, model_confidence = _predict_segment_risk(segment, model_trainer)
+                    if model_confidence is not None:
+                        confidence = model_confidence
+                    else:
+                        confidence = 0.5
+                except Exception as e:
+                    logging.debug(f"Could not calculate confidence for segment {idx}: {e}")
+                    confidence = 0.5
+            else:
+                confidence = float(confidence) if confidence is not None and pd.notna(confidence) else 0.5
+            
             segment_dict = {
                 "id": str(segment.get("segment_id", idx)),
                 "LINEAR_NAME": str(segment.get("LINEAR_NAME", "Unknown")),
                 "ROAD_CLASS": str(segment.get("ROAD_CLASS", segment.get("LINEAR_NAME_TYPE", "Unknown"))),
                 "segment_length": float(segment_length),
                 "risk_label": str(segment.get("risk_label", "low")) if "risk_label" in segment else "low",
-                "confidence": float(segment.get("confidence", 0.5)) if "confidence" in segment and pd.notna(segment.get("confidence")) else 0.5,
+                "confidence": confidence,
                 "num_total_crashes": int(segment.get("num_total_crashes", 0)) if "num_total_crashes" in segment else 0,
                 "num_ksi_crashes": int(segment.get("num_ksi_crashes", 0)) if "num_ksi_crashes" in segment else 0,
                 "fatality_count": int(segment.get("fatality_count", 0)) if "fatality_count" in segment else 0,
@@ -1661,7 +1693,25 @@ def _get_data_validation_html():
                 html += `<tr><td style="padding: 5px;"><strong>Total KSI Crashes:</strong></td><td style="padding: 5px;">${result.summary.total_ksi_crashes.toLocaleString()}</td></tr>`;
                 html += `<tr><td style="padding: 5px;"><strong>KSI Ratio:</strong></td><td style="padding: 5px;">${result.summary.ksi_ratio}%</td></tr>`;
                 html += `<tr><td style="padding: 5px;"><strong>Total Fatalities:</strong></td><td style="padding: 5px;">${result.summary.total_fatalities.toLocaleString()}</td></tr>`;
+                if (result.summary.segments_with_fatalities !== undefined) {
+                    html += `<tr><td style="padding: 5px;"><strong>Segments with Fatalities:</strong></td><td style="padding: 5px;">${result.summary.segments_with_fatalities.toLocaleString()}</td></tr>`;
+                }
                 html += `</table>`;
+                
+                // Show fatality accuracy check
+                if (result.fatality_accuracy_check) {
+                    const acc = result.fatality_accuracy_check;
+                    const statusColor = acc.likely_accurate ? '#28a745' : '#dc3545';
+                    const statusText = acc.likely_accurate ? '✅ Likely Accurate' : '❌ Likely Inaccurate';
+                    html += `<div style="background: ${acc.likely_accurate ? '#d4edda' : '#f8d7da'}; border: 1px solid ${statusColor}; border-radius: 4px; padding: 10px; margin-bottom: 15px;">`;
+                    html += `<h5 style="margin-top: 0; color: ${statusColor};">Fatality Data Accuracy: ${statusText}</h5>`;
+                    html += `<p style="margin-bottom: 5px;"><strong>Total Fatalities in Data:</strong> ${acc.total_fatalities_in_data.toLocaleString()}</p>`;
+                    html += `<p style="margin-bottom: 5px;"><strong>Expected Range:</strong> ${acc.expected_range}</p>`;
+                    if (!acc.likely_accurate) {
+                        html += `<p style="margin-bottom: 0; color: ${statusColor};"><strong>⚠️ Warning:</strong> ${acc.warning}</p>`;
+                    }
+                    html += `</div>`;
+                }
                 
                 html += `<h4>Data Structure Explanation</h4>`;
                 html += `<p><strong>Total Crashes Source:</strong> ${result.data_structure_explanation.total_crashes_source}</p>`;
