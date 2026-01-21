@@ -715,25 +715,79 @@ struct RouteNavigationView: View {
             return
         }
         
-        // Create Google Maps URL with directions
-        // Format: https://www.google.com/maps/dir/?api=1&origin=lat,lng&destination=lat,lng&travelmode=driving
-        let googleMapsURL = "https://www.google.com/maps/dir/?api=1&origin=\(start.latitude),\(start.longitude)&destination=\(destination.latitude),\(destination.longitude)&travelmode=driving"
+        // Extract waypoints from route steps to preserve the selected route
+        // Google Maps URL supports waypoints to guide the route (max ~23 waypoints)
+        let steps = route.steps
+        var waypoints: [String] = []
         
-        if let url = URL(string: googleMapsURL) {
+        // Use more waypoints (up to 23) to better preserve the route shape
+        // Sample evenly along the route, prioritizing steps with turn instructions
+        let maxWaypoints = 23
+        let stepInterval = max(1, steps.count / maxWaypoints)
+        
+        // first pass: collect steps with instructions (turns, merges, etc.)
+        var instructionSteps: [Int] = []
+        for (index, step) in steps.enumerated() {
+            if index > 0 && index < steps.count - 1 && !step.instructions.isEmpty {
+                instructionSteps.append(index)
+            }
+        }
+        
+        // second pass: sample evenly along the route
+        for (index, step) in steps.enumerated() {
+            // skip first and last steps (they're the origin/destination)
+            if index > 0 && index < steps.count - 1 {
+                let shouldInclude = index % stepInterval == 0 || instructionSteps.contains(index)
+                
+                if shouldInclude {
+                    // get the first coordinate from the step's polyline (start of the step)
+                    let stepCoords = step.polyline.coordinates
+                    if let firstCoord = stepCoords.first {
+                        let waypointString = "\(firstCoord.latitude),\(firstCoord.longitude)"
+                        // avoid duplicates
+                        if !waypoints.contains(waypointString) {
+                            waypoints.append(waypointString)
+                        }
+                    }
+                }
+            }
+        }
+        
+        // limit to max waypoints to avoid URL length issues
+        let limitedWaypoints = Array(waypoints.prefix(maxWaypoints))
+        
+        // build Google Maps URL with waypoints
+        var googleMapsURL = "https://www.google.com/maps/dir/?api=1&origin=\(start.latitude),\(start.longitude)&destination=\(destination.latitude),\(destination.longitude)&travelmode=driving"
+        
+        // add waypoints if we have any
+        if !limitedWaypoints.isEmpty {
+            let waypointsString = limitedWaypoints.joined(separator: "|")
+            googleMapsURL += "&waypoints=\(waypointsString)"
+        }
+        
+        // URL encode the waypoints string to handle special characters
+        if let encodedURL = googleMapsURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+           let url = URL(string: encodedURL) {
             if UIApplication.shared.canOpenURL(url) {
                 UIApplication.shared.open(url)
             } else {
-                // Fallback to web version
-                if let webURL = URL(string: googleMapsURL) {
+                // fallback to web version
+                if let webURL = URL(string: encodedURL) {
                     UIApplication.shared.open(webURL)
                 }
+            }
+        } else {
+            // fallback: try without waypoints if encoding fails
+            let fallbackURL = "https://www.google.com/maps/dir/?api=1&origin=\(start.latitude),\(start.longitude)&destination=\(destination.latitude),\(destination.longitude)&travelmode=driving"
+            if let url = URL(string: fallbackURL) {
+                UIApplication.shared.open(url)
             }
         }
     }
 }
 
 
-// MARK: - Route Comparison Card
+// MARK: - route comparison card
 struct RouteComparisonCard: View {
     let saferRoute: Route
     let optimalRoute: Route
@@ -882,8 +936,8 @@ struct RouteComparisonCard: View {
                     if selectedRoute != nil {
                         Button(action: onExportToGoogleMaps) {
                             HStack {
-                                Image(systemName: "map.fill")
-                                Text("Open in Google Maps")
+                                Image(systemName: "car.fill")
+                                Text("Start Driving")
                             }
                             .frame(maxWidth: .infinity)
                             .padding()
