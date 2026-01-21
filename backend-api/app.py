@@ -604,6 +604,61 @@ def fatality_diagnostic():
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
+@app.route("/api/model-features", methods=["GET"])
+def get_model_features():
+    """
+    Get the list of features/inputs used by the model
+    """
+    if model_trainer is None or model_trainer.model is None:
+        return jsonify({"error": "Model not loaded"}), 500
+    
+    try:
+        # Get feature columns from the model trainer
+        feature_columns = model_trainer.feature_columns if hasattr(model_trainer, 'feature_columns') and model_trainer.feature_columns else []
+        
+        # Categorize features
+        temporal_features = [f for f in feature_columns if any(x in f.lower() for x in ['time', 'season', 'weekend', 'hour'])]
+        road_features = [f for f in feature_columns if any(x in f.lower() for x in ['road', 'class', 'length'])]
+        other_features = [f for f in feature_columns if f not in temporal_features and f not in road_features]
+        
+        # Get feature importance if available
+        feature_importance = {}
+        if hasattr(model_trainer.model, 'feature_importances_') and model_trainer.feature_columns:
+            importances = model_trainer.model.feature_importances_
+            feature_importance = dict(zip(model_trainer.feature_columns, importances.tolist()))
+            # Sort by importance
+            feature_importance = dict(sorted(feature_importance.items(), key=lambda x: x[1], reverse=True))
+        
+        return jsonify({
+            "total_features": len(feature_columns),
+            "feature_columns": feature_columns,
+            "feature_categories": {
+                "temporal_features": temporal_features,
+                "road_characteristics": road_features,
+                "other_features": other_features
+            },
+            "feature_importance": feature_importance,
+            "excluded_columns": {
+                "metadata": [
+                    'geometry', 'segment_id', 'CENTRELINE_ID', 'LINEAR_NAME_ID',
+                    'LINEAR_NAME', 'LINEAR_NAME_TYPE', 'OBJECTID', 'MI_PRINX'
+                ],
+                "data_leakage": [
+                    'risk_label', 'risk_level', 'fatality_flag', 'risk_score_raw', 'severity_index',
+                    'num_total_crashes', 'num_ksi_crashes', 'fatality_count', 'has_crashes', 'has_ksi', 'has_fatalities',
+                    'ksi_ratio', 'fatality_ratio', 'crash_density', 'ksi_density',
+                    'length_crash_interaction', 'length_ksi_interaction'
+                ],
+                "note": "Direct crash counts and ratios are excluded to prevent data leakage. The model learns patterns from other features instead."
+            }
+        })
+    except Exception as e:
+        logging.error(f"Error getting model features: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/data-verification", methods=["GET"])
 def data_verification():
     """
@@ -1315,12 +1370,16 @@ def _get_data_validation_html():
                 <button onclick="showDataVerification()" style="background: #856404; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 10px;">
                     View Data Verification Details
                 </button>
-                <button onclick="showFatalityDiagnostic()" style="background: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                <button onclick="showFatalityDiagnostic()" style="background: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 10px;">
                     🔍 Diagnose Fatality Data Issue
+                </button>
+                <button onclick="showModelFeatures()" style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                    📊 View Model Features
                 </button>
             </p>
             <div id="verificationDetails" style="display: none; margin-top: 15px; padding: 10px; background: white; border-radius: 4px;"></div>
             <div id="fatalityDiagnosticDetails" style="display: none; margin-top: 15px; padding: 10px; background: white; border-radius: 4px;"></div>
+            <div id="modelFeaturesDetails" style="display: none; margin-top: 15px; padding: 10px; background: white; border-radius: 4px;"></div>
         </div>
         
         <div id="errorContainer"></div>
@@ -1836,6 +1895,88 @@ def _get_data_validation_html():
                 detailsDiv.innerHTML = html;
             } catch (error) {
                 detailsDiv.innerHTML = `<p style="color: #dc3545;">Error loading diagnostic data: ${error.message}</p>`;
+            }
+        }
+        
+        async function showModelFeatures() {
+            const detailsDiv = document.getElementById('modelFeaturesDetails');
+            detailsDiv.style.display = 'block';
+            detailsDiv.innerHTML = '<p>Loading model features...</p>';
+            
+            try {
+                const response = await fetch('/api/model-features');
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(result.error || 'Failed to load model features');
+                }
+                
+                let html = '<h4 style="margin-top: 0;">📊 Model Input Features</h4>';
+                html += `<p><strong>Total Features Used:</strong> ${result.total_features}</p>`;
+                
+                // Feature categories
+                html += '<h5 style="margin-top: 15px;">Feature Categories</h5>';
+                
+                if (result.feature_categories.temporal_features.length > 0) {
+                    html += '<details style="margin-top: 10px;"><summary><strong>⏰ Temporal Features</strong> (' + result.feature_categories.temporal_features.length + ')</summary>';
+                    html += '<ul style="margin-top: 5px;">';
+                    result.feature_categories.temporal_features.forEach(f => {
+                        html += `<li><code>${f}</code></li>`;
+                    });
+                    html += '</ul></details>';
+                }
+                
+                if (result.feature_categories.road_characteristics.length > 0) {
+                    html += '<details style="margin-top: 10px;"><summary><strong>🛣️ Road Characteristics</strong> (' + result.feature_categories.road_characteristics.length + ')</summary>';
+                    html += '<ul style="margin-top: 5px;">';
+                    result.feature_categories.road_characteristics.forEach(f => {
+                        html += `<li><code>${f}</code></li>`;
+                    });
+                    html += '</ul></details>';
+                }
+                
+                if (result.feature_categories.other_features.length > 0) {
+                    html += '<details style="margin-top: 10px;"><summary><strong>📈 Other Features</strong> (' + result.feature_categories.other_features.length + ')</summary>';
+                    html += '<ul style="margin-top: 5px;">';
+                    result.feature_categories.other_features.forEach(f => {
+                        html += `<li><code>${f}</code></li>`;
+                    });
+                    html += '</ul></details>';
+                }
+                
+                // Feature importance
+                if (result.feature_importance && Object.keys(result.feature_importance).length > 0) {
+                    html += '<h5 style="margin-top: 20px;">Feature Importance (Top 15)</h5>';
+                    html += '<p style="font-size: 12px; color: #6e6e73;">Higher values indicate features that are more important for predictions</p>';
+                    html += '<table style="width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px;">';
+                    html += '<tr style="background: #f5f5f7;"><th style="padding: 8px; text-align: left;">Feature</th><th style="padding: 8px; text-align: right;">Importance</th></tr>';
+                    const topFeatures = Object.entries(result.feature_importance).slice(0, 15);
+                    topFeatures.forEach(([feature, importance]) => {
+                        const percentage = (importance * 100).toFixed(2);
+                        html += `<tr><td style="padding: 8px;"><code>${feature}</code></td><td style="padding: 8px; text-align: right;">${percentage}%</td></tr>`;
+                    });
+                    html += '</table>';
+                }
+                
+                // Excluded columns explanation
+                html += '<h5 style="margin-top: 20px;">🚫 Excluded Features (Data Leakage Prevention)</h5>';
+                html += '<p style="font-size: 12px; color: #6e6e73;">' + result.excluded_columns.note + '</p>';
+                html += '<details style="margin-top: 10px;"><summary><strong>Excluded Columns</strong></summary>';
+                html += '<ul style="margin-top: 5px; font-size: 11px;">';
+                result.excluded_columns.data_leakage.forEach(col => {
+                    html += `<li><code>${col}</code></li>`;
+                });
+                html += '</ul></details>';
+                
+                // All features list
+                html += '<details style="margin-top: 15px;"><summary><strong>Complete Feature List</strong></summary>';
+                html += '<p style="font-size: 11px; font-family: monospace; background: #f5f5f7; padding: 10px; border-radius: 4px; overflow-x: auto;">';
+                html += result.feature_columns.join(', ');
+                html += '</p></details>';
+                
+                detailsDiv.innerHTML = html;
+            } catch (error) {
+                detailsDiv.innerHTML = `<p style="color: #dc3545;">Error loading model features: ${error.message}</p>`;
             }
         }
     </script>
