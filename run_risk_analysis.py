@@ -125,10 +125,10 @@ def main():
         dashboard_file = mapper.create_risk_analysis_dashboard(labeled_data, results)
         print(f"    Dashboard saved to: {dashboard_file}")
         
-        # Export data for QGIS
+        # Export data for QGIS (with confidence scores)
         print("  Exporting data for QGIS...")
         logger.info("Exporting data for QGIS...")
-        exported_files = mapper.export_data_for_qgis(labeled_data)
+        exported_files = mapper.export_data_for_qgis(labeled_data, model_trainer=trainer)
         print(f"    GeoJSON files saved to: {exported_files['geojson']}")
         print(f"    CSV file saved to: {exported_files['csv']}")
         

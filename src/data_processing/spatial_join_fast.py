@@ -143,11 +143,30 @@ def _count_crashes_fast(points_gdf: gpd.GeoDataFrame,
             injury_col = KSI_COLUMNS.get('injury', 'INJURY')
             fatalities_col = KSI_COLUMNS.get('fatalities', 'FATAL_NO')
         
-        if injury_col in point.index and pd.notna(point[injury_col]):
+        # Prioritize fatalities column (actual count) over injury column (text description)
+        fatalities_count = 0
+        if fatalities_col in point.index and pd.notna(point[fatalities_col]):
+            try:
+                # Try to convert to numeric first (handles float64, int64, etc.)
+                fatalities_value = pd.to_numeric(point[fatalities_col], errors='coerce')
+                if pd.notna(fatalities_value) and fatalities_value > 0:
+                    fatalities_count = int(fatalities_value)
+            except (ValueError, TypeError):
+                # If conversion fails, try direct int conversion
+                try:
+                    fatalities_count = int(point[fatalities_col])
+                except (ValueError, TypeError):
+                    fatalities_count = 0
+        
+        # If fatalities column doesn't have a count, check injury column for "Fatal" indicator
+        # (but still use actual count if available)
+        if fatalities_count == 0 and injury_col in point.index and pd.notna(point[injury_col]):
             if 'Fatal' in str(point[injury_col]).lower():
-                counts[segment_id]['fatalities'] += 1
-        elif fatalities_col in point.index and pd.notna(point[fatalities_col]):
-            counts[segment_id]['fatalities'] += int(point[fatalities_col])
+                fatalities_count = 1
+        
+        # Add the fatalities count
+        if fatalities_count > 0:
+            counts[segment_id]['fatalities'] += fatalities_count
     
     logger.info(f"Found {len(counts)} segments with {crash_type} crashes")
     return counts
