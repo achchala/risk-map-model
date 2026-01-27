@@ -1,0 +1,114 @@
+name: iOS Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - adriel-routes-ui
+      - adriel-unit-tests
+      - unit-tests
+    paths:
+      - 'ios-app/**'
+      - '.github/workflows/ios-tests.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'ios-app/**'
+      - '.github/workflows/ios-tests.yml'
+
+jobs:
+  test:
+    name: Run iOS Unit Tests
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode_15.2.app/Contents/Developer
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install SwiftLint
+        run: |
+          if ! command -v swiftlint &> /dev/null; then
+            brew install swiftlint
+          fi
+          swiftlint version
+
+      - name: Run SwiftLint
+        working-directory: ios-app/RiskMapApp
+        run: |
+          if [ -f .swiftlint.yml ]; then
+            swiftlint lint --strict --reporter github-actions-logging
+          else
+            echo "⚠️  No SwiftLint configuration found"
+          fi
+
+      - name: Build and Test
+        working-directory: ios-app/RiskMapApp
+        run: |
+          xcodebuild test \
+            -scheme RiskMapApp \
+            -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=17.2' \
+            -only-testing:RiskMapAppTests \
+            -enableCodeCoverage YES \
+            -derivedDataPath DerivedData \
+            -resultBundlePath TestResults.xcresult \
+            | xcpretty --color --simple
+
+      - name: Generate Code Coverage Report
+        if: success()
+        working-directory: ios-app/RiskMapApp
+        run: |
+          xcrun xccov view --report --json DerivedData/Logs/Test/*.xcresult > coverage.json
+          echo "📊 Code Coverage Summary:"
+          xcrun xccov view --report DerivedData/Logs/Test/*.xcresult
+
+      - name: Check Coverage Threshold
+        if: success()
+        working-directory: ios-app/RiskMapApp
+        run: |
+          COVERAGE=$(xcrun xccov view --report DerivedData/Logs/Test/*.xcresult | grep "RiskMapApp.app" | awk '{print $NF}' | sed 's/%//')
+          echo "Total Coverage: ${COVERAGE}%"
+
+          THRESHOLD=70
+          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+            echo "⚠️  Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
+            exit 1
+          else
+            echo "✅ Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
+          fi
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ios-app/RiskMapApp/TestResults.xcresult
+          retention-days: 7
+
+      - name: Upload Coverage Report
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ios-app/RiskMapApp/coverage.json
+          retention-days: 7
+
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "### 📱 iOS Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ ${{ job.status }} == 'success' ]; then
+            echo "✅ All tests passed!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Some tests failed" >> $GITHUB_STEP_SUMMARY
+          fi
