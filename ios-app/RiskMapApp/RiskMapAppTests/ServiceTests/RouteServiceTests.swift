@@ -28,7 +28,7 @@ final class RouteServiceTests: XCTestCase {
 
     // MARK: - Route Calculation Tests
 
-    func testCalculateRoutesSuccess() async {
+    func testCalculateRoutesSuccess() async throws {
         // Setup mock routes
         let start = TestData.torontoCoordinate()
         let destination = CLLocationCoordinate2D(latitude: 43.7, longitude: -79.4)
@@ -38,8 +38,12 @@ final class RouteServiceTests: XCTestCase {
         await routeService.calculateRoutes(from: start, to: destination)
 
         XCTAssertEqual(routeService.calculateRoutesCallCount, 1)
-        XCTAssertEqual(routeService.lastStartLocation?.latitude, start.latitude, accuracy: 0.0001)
-        XCTAssertEqual(routeService.lastDestinationLocation?.latitude, destination.latitude, accuracy: 0.0001)
+
+        let startLoc = try XCTUnwrap(routeService.lastStartLocation)
+        XCTAssertEqual(startLoc.latitude, start.latitude, accuracy: 0.0001)
+
+        let destLoc = try XCTUnwrap(routeService.lastDestinationLocation)
+        XCTAssertEqual(destLoc.latitude, destination.latitude, accuracy: 0.0001)
     }
 
     func testCalculateRoutesFailure() async {
@@ -68,18 +72,19 @@ final class RouteServiceTests: XCTestCase {
         XCTAssertTrue(routeService.isLoading)
     }
 
-    func testCalculateRoutesTracksLocations() async {
+    func testCalculateRoutesTracksLocations() async throws {
         let start = CLLocationCoordinate2D(latitude: 43.6532, longitude: -79.3832)
         let destination = CLLocationCoordinate2D(latitude: 43.7000, longitude: -79.4000)
 
         await routeService.calculateRoutes(from: start, to: destination)
 
-        XCTAssertNotNil(routeService.lastStartLocation)
-        XCTAssertNotNil(routeService.lastDestinationLocation)
-        XCTAssertEqual(routeService.lastStartLocation?.latitude, start.latitude, accuracy: 0.0001)
-        XCTAssertEqual(routeService.lastStartLocation?.longitude, start.longitude, accuracy: 0.0001)
-        XCTAssertEqual(routeService.lastDestinationLocation?.latitude, destination.latitude, accuracy: 0.0001)
-        XCTAssertEqual(routeService.lastDestinationLocation?.longitude, destination.longitude, accuracy: 0.0001)
+        let startLoc = try XCTUnwrap(routeService.lastStartLocation)
+        let destLoc = try XCTUnwrap(routeService.lastDestinationLocation)
+
+        XCTAssertEqual(startLoc.latitude, start.latitude, accuracy: 0.0001)
+        XCTAssertEqual(startLoc.longitude, start.longitude, accuracy: 0.0001)
+        XCTAssertEqual(destLoc.latitude, destination.latitude, accuracy: 0.0001)
+        XCTAssertEqual(destLoc.longitude, destination.longitude, accuracy: 0.0001)
     }
 
     // MARK: - Route Analysis Tests
