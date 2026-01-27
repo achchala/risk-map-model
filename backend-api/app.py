@@ -12,7 +12,6 @@ from pathlib import Path
 import logging
 import sys
 from shapely.geometry import Point, box
-from sklearn.neighbors import BallTree
 
 # import existing modules
 PROJECT_ROOT = Path(__file__).parent.parent

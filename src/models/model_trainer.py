@@ -21,19 +21,20 @@ from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_sc
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 from sklearn.utils.class_weight import compute_class_weight
-try:
-    from imblearn.over_sampling import SMOTE
-    from imblearn.pipeline import Pipeline as ImbPipeline
-    SMOTE_AVAILABLE = True
-except ImportError:
-    SMOTE_AVAILABLE = False
-    logger.warning("SMOTE not available. Using class weights instead.")
 
 # Add parent directory to path for config import
 sys.path.append(str(Path(__file__).parent.parent.parent))
 from config import *
 
 logger = logging.getLogger(__name__)
+
+try:
+    from imblearn.over_sampling import SMOTE
+    from imblearn.pipeline import Pipeline as ImbPipeline
+    SMOTE_AVAILABLE = True
+except (ImportError, AttributeError) as e:
+    SMOTE_AVAILABLE = False
+    logger.warning(f"SMOTE not available ({type(e).__name__}: {e}). Using class weights instead.")
 
 class ModelTrainer:
     """
