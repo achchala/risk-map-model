@@ -87,7 +87,11 @@ class ModelTrainer:
             # Direct outcome variables used for labeling (data leakage)
             'num_total_crashes', 'num_ksi_crashes', 'fatality_count', 'has_crashes', 'has_ksi', 'has_fatalities',
             'ksi_ratio', 'fatality_ratio', 'crash_density', 'ksi_density',
-            'length_crash_interaction', 'length_ksi_interaction'
+            'length_crash_interaction', 'length_ksi_interaction',
+            # Simulated temporal features (removed)
+            'weekend_crash_ratio', 'avg_hour', 'time_of_day_late_night', 'time_of_day_morning',
+            'time_of_day_afternoon', 'time_of_day_evening', 'season_winter', 'season_spring',
+            'season_summer', 'season_fall'
         ]
         
         # Get feature columns

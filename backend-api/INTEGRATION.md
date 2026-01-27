@@ -112,10 +112,7 @@ returns status of:
 when the model makes a prediction:
 
 1. **feature extraction**: extracts all features the model expects
-   - temporal features (time_of_day_*, season_*)
    - road characteristics (road_class_*, segment_length)
-   - crash statistics (if available in pre-processed data)
-   - derived features (severity_index, etc.)
 
 2. **scaling**: features are scaled using the same StandardScaler from training
 
