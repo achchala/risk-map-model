@@ -41,7 +41,7 @@ enum RiskLevel: String, Codable, CaseIterable {
 }
 
 // MARK: - Road Segment Model
-struct RoadSegment: Identifiable, Codable {
+struct RoadSegment: Identifiable, Codable, Equatable {
     let id: String
     let linearName: String
     let roadClass: String
@@ -53,7 +53,7 @@ struct RoadSegment: Identifiable, Codable {
     let fatalityCount: Int
     let coordinates: [Coordinate]
     
-    struct Coordinate: Codable {
+    struct Coordinate: Codable, Equatable {
         let latitude: Double
         let longitude: Double
     }

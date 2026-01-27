@@ -21,11 +21,11 @@ struct MapView: View {
         span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
     )
     @State private var selectedSegment: RoadSegment?
-    @State private var showDetail = false
-    
+
     var body: some View {
         ZStack {
-            Map(position: $cameraPosition, interactionModes: [.pan, .zoom, .rotate, .pitch]) {
+            MapReader { proxy in
+                Map(position: $cameraPosition, interactionModes: [.pan, .zoom, .rotate, .pitch]) {
                 ForEach(riskService.roadSegments) { segment in
                     // draw road segments as colored polylines
                     if !segment.coordinates.isEmpty {
@@ -52,6 +52,10 @@ struct MapView: View {
                 currentRegion = context.region
                 loadRiskDataForRegion(context.region)
             }
+            .onTapGesture { position in
+                handleMapTap(at: position, proxy: proxy)
+            }
+        } // end MapReader
             
             // loading indicator
             if riskService.isLoading {
@@ -76,11 +80,49 @@ struct MapView: View {
                 }
             }
         }
-        .sheet(item: $selectedSegment) { segment in
-            RiskDetailView(segment: segment)
+        .overlay(alignment: .bottom) {
+            if let segment = selectedSegment {
+                // Semi-transparent background overlay
+                Color.black.opacity(0.3)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.3)) {
+                            selectedSegment = nil
+                        }
+                    }
+
+                // Bottom sheet popup
+                SegmentDetailPopupView(segment: segment) {
+                    withAnimation(.spring(response: 0.3)) {
+                        selectedSegment = nil
+                    }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .padding(.bottom, 20)
+            }
+        }
+        .animation(.spring(response: 0.3), value: selectedSegment)
+    }
+
+    // MARK: - Tap Handler
+
+    private func handleMapTap(at position: CGPoint, proxy: MapProxy) {
+        // Convert screen position to map coordinate
+        guard let coordinate = proxy.convert(position, from: .local) else {
+            return
+        }
+
+        // Find nearest road segment to tap location (within 50m threshold)
+        if let nearest = findNearestSegment(
+            to: coordinate,
+            in: riskService.roadSegments
+        ) {
+            withAnimation(.spring(response: 0.3)) {
+                selectedSegment = nearest
+            }
         }
     }
-    
+
     private func loadRiskData() {
         // use the current region
         loadRiskDataForRegion(currentRegion)
