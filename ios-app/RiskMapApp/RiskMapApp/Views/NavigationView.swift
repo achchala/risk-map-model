@@ -13,6 +13,7 @@ struct RouteNavigationView: View {
     @EnvironmentObject var riskService: RiskService
     @StateObject private var routeService: RouteService
     @StateObject private var locationManager = LocationManager()
+    @StateObject private var weatherService = WeatherService()
     @StateObject private var startSearchCompleter = LocationSearchCompleter()
     @StateObject private var destinationSearchCompleter = LocationSearchCompleter()
     
@@ -24,6 +25,7 @@ struct RouteNavigationView: View {
     @State private var showRouteComparison = false
     @State private var showStartSuggestions = false
     @State private var showDestinationSuggestions = false
+    @State private var currentWeather: WeatherData?
     
     @State private var cameraPosition = MapCameraPosition.region(
         MKCoordinateRegion(
@@ -41,14 +43,136 @@ struct RouteNavigationView: View {
             mapView
             searchAndControlsView
             routeLegend
+            weatherInfoBadge
         }
         .onAppear {
             locationManager.requestLocation()
+            loadWeatherInfo()
         }
         .onTapGesture {
             // Dismiss suggestions when tapping on map
             showStartSuggestions = false
             showDestinationSuggestions = false
+        }
+    }
+    
+    // MARK: - weather info badge
+    @ViewBuilder
+    private var weatherInfoBadge: some View {
+        if let weather = currentWeather {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    weatherIcon(for: weather.condition)
+                    Text(weather.condition.displayName)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                }
+                
+                HStack(spacing: 4) {
+                    Image(systemName: "clock.fill")
+                        .font(.system(size: 10))
+                    Text(timeOfDayLabel())
+                        .font(.caption2)
+                }
+                .foregroundColor(.secondary)
+                
+                // shows if using API or fallback
+                if weatherService.errorMessage != nil {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 8))
+                            .foregroundColor(.orange)
+                        Text("Fallback")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                } else {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 8))
+                            .foregroundColor(.green)
+                        Text("Live")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(.systemBackground).opacity(0.95))
+            .cornerRadius(10)
+            .shadow(radius: 5)
+            .padding(.top, 100)
+            .padding(.leading, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+    
+    @ViewBuilder
+    private func weatherIcon(for condition: WeatherData.WeatherCondition) -> some View {
+        switch condition {
+        case .clear:
+            Image(systemName: "sun.max.fill")
+        case .cloudy:
+            Image(systemName: "cloud.fill")
+        case .rain, .heavyRain:
+            Image(systemName: "cloud.rain.fill")
+        case .snow, .heavySnow:
+            Image(systemName: "cloud.snow.fill")
+        case .fog, .mist:
+            Image(systemName: "cloud.fog.fill")
+        case .thunderstorm:
+            Image(systemName: "cloud.bolt.fill")
+        case .sleet:
+            Image(systemName: "cloud.sleet.fill")
+        }
+    }
+    
+    private func timeOfDayLabel() -> String {
+        let calendar = Calendar.current
+        let now = Date()
+        let hour = calendar.component(.hour, from: now)
+        let weekday = calendar.component(.weekday, from: now)
+        let isWeekend = weekday == 1 || weekday == 7
+        
+        // late night: 11 PM - 4:59 AM
+        if hour >= 23 || hour < 5 {
+            return "Late Night"
+        }
+        // night: 10 PM - 10:59 PM
+        else if hour >= 22 {
+            return "Night"
+        }
+        // early morning: 5 AM - 6:59 AM
+        else if hour < 7 {
+            return "Early Morning"
+        }
+        // morning rush: 7 AM - 9:59 AM
+        else if hour >= 7 && hour < 10 {
+            return isWeekend ? "Morning" : "Rush Hour"
+        }
+        // daytime: 10 AM - 3:59 PM
+        else if hour >= 10 && hour < 16 {
+            return "Daytime"
+        }
+        // evening rush: 4 PM - 6:59 PM
+        else if hour >= 16 && hour < 19 {
+            return isWeekend ? "Evening" : "Rush Hour"
+        }
+        // evening: 7 PM - 9:59 PM
+        else {
+            return "Evening"
+        }
+    }
+    
+    private func loadWeatherInfo() {
+        Task {
+            // load weather for toronto center (or use route center if available)
+            let location = startLocation ?? CLLocationCoordinate2D(latitude: 43.6532, longitude: -79.3832)
+            let weather = await weatherService.getWeatherData(for: location)
+            await MainActor.run {
+                currentWeather = weather
+            }
         }
     }
     
@@ -441,7 +565,8 @@ struct RouteNavigationView: View {
                 selectedRoute: $selectedRoute,
                 onExportToGoogleMaps: {
                     exportToGoogleMaps(route: selectedRoute ?? safer)
-                }
+                },
+                currentWeather: currentWeather
             )
             .transition(.move(edge: .bottom))
         }
@@ -574,6 +699,18 @@ struct RouteNavigationView: View {
         }
         
         print("📍 Calculating routes from \(start.latitude), \(start.longitude) to \(destination.latitude), \(destination.longitude)")
+        
+        // Update weather info for route area
+        Task {
+            let routeCenter = CLLocationCoordinate2D(
+                latitude: (start.latitude + destination.latitude) / 2,
+                longitude: (start.longitude + destination.longitude) / 2
+            )
+            let weather = await weatherService.getWeatherData(for: routeCenter)
+            await MainActor.run {
+                currentWeather = weather
+            }
+        }
         
         Task {
             // Calculate routes with safety analysis
@@ -793,6 +930,7 @@ struct RouteComparisonCard: View {
     let optimalRoute: Route
     @Binding var selectedRoute: Route?
     let onExportToGoogleMaps: () -> Void
+    let currentWeather: WeatherData?
     @State private var isExpanded = true
     
     private var comparison: RouteComparison {
@@ -891,6 +1029,27 @@ struct RouteComparisonCard: View {
                         selectedRoute = optimalRoute
                     }
                     
+                    // weather & time context
+                    if let weather = currentWeather {
+                        HStack(spacing: 12) {
+                            weatherIcon(for: weather.condition)
+                                .foregroundColor(.blue)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Current Conditions")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                Text("\(weather.condition.displayName) • \(timeOfDayLabel())")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+                        .padding(.horizontal)
+                    }
+                    
                     // Detailed Explanation
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
@@ -955,6 +1114,63 @@ struct RouteComparisonCard: View {
         .background(Color(.systemBackground))
         .cornerRadius(16, corners: [.topLeft, .topRight])
         .shadow(radius: 10)
+    }
+    
+    @ViewBuilder
+    private func weatherIcon(for condition: WeatherData.WeatherCondition) -> some View {
+        switch condition {
+        case .clear:
+            Image(systemName: "sun.max.fill")
+        case .cloudy:
+            Image(systemName: "cloud.fill")
+        case .rain, .heavyRain:
+            Image(systemName: "cloud.rain.fill")
+        case .snow, .heavySnow:
+            Image(systemName: "cloud.snow.fill")
+        case .fog, .mist:
+            Image(systemName: "cloud.fog.fill")
+        case .thunderstorm:
+            Image(systemName: "cloud.bolt.fill")
+        case .sleet:
+            Image(systemName: "cloud.sleet.fill")
+        }
+    }
+    
+    private func timeOfDayLabel() -> String {
+        let calendar = Calendar.current
+        let now = Date()
+        let hour = calendar.component(.hour, from: now)
+        let weekday = calendar.component(.weekday, from: now)
+        let isWeekend = weekday == 1 || weekday == 7
+        
+        // Late night: 11 PM - 4:59 AM
+        if hour >= 23 || hour < 5 {
+            return "Late Night"
+        }
+        // Night: 10 PM - 10:59 PM
+        else if hour >= 22 {
+            return "Night"
+        }
+        // Early morning: 5 AM - 6:59 AM
+        else if hour < 7 {
+            return "Early Morning"
+        }
+        // Morning rush: 7 AM - 9:59 AM
+        else if hour >= 7 && hour < 10 {
+            return isWeekend ? "Morning" : "Rush Hour"
+        }
+        // Daytime: 10 AM - 3:59 PM
+        else if hour >= 10 && hour < 16 {
+            return "Daytime"
+        }
+        // Evening rush: 4 PM - 6:59 PM
+        else if hour >= 16 && hour < 19 {
+            return isWeekend ? "Evening" : "Rush Hour"
+        }
+        // Evening: 7 PM - 9:59 PM
+        else {
+            return "Evening"
+        }
     }
     
     private func formatTime(_ seconds: TimeInterval) -> String {

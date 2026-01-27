@@ -17,9 +17,11 @@ class RouteService: ObservableObject {
     @Published var errorMessage: String?
     
     private let riskService: RiskService
+    private let weatherService: WeatherService
     
-    init(riskService: RiskService) {
+    init(riskService: RiskService, weatherService: WeatherService = WeatherService()) {
         self.riskService = riskService
+        self.weatherService = weatherService
     }
     
     // Calculate both safer and optimal routes
@@ -128,6 +130,21 @@ class RouteService: ObservableObject {
         
         print("📍 Found \(routes.count) alternate routes, analyzing for safety...")
         
+        // Get current weather and time data for accurate risk assessment
+        let routeCenter = CLLocationCoordinate2D(
+            latitude: (start.latitude + destination.latitude) / 2,
+            longitude: (start.longitude + destination.longitude) / 2
+        )
+        let weather = await weatherService.getWeatherData(for: routeCenter)
+        let calendar = Calendar.current
+        let now = Date()
+        let hour = calendar.component(.hour, from: now)
+        let weekday = calendar.component(.weekday, from: now)
+        let isWeekend = weekday == 1 || weekday == 7
+        let timeOfDay = (hour: hour, isWeekend: isWeekend)
+        
+        print("🌤️ Weather: \(weather.condition.displayName), Time: \(hour):00 (\(isWeekend ? "Weekend" : "Weekday"))")
+        
         // Get risk segments for all routes (limit to first 5 routes for performance)
         var routeRiskScores: [(route: MKRoute, score: Double)] = []
         
@@ -161,7 +178,11 @@ class RouteService: ObservableObject {
         let riskSegments: [RoadSegment]
         
         do {
-            riskSegments = try await riskService.fetchRiskPredictions(for: combinedRegion)
+            riskSegments = try await riskService.fetchRiskPredictions(
+                for: combinedRegion,
+                weather: weather,
+                timeOfDay: timeOfDay
+            )
         } catch {
             // If risk data fetch fails, return the second route (different from optimal)
             print("Warning: Could not fetch risk data, using second route: \(error.localizedDescription)")
@@ -219,10 +240,25 @@ class RouteService: ObservableObject {
     private func analyzeRoute(_ route: MKRoute, type: Route.RouteType) async throws -> Route {
         // Get risk segments for the route area
         let routeRegion = createRegionForRoute(route)
+        
+        // Get current weather and time data for accurate risk assessment
+        let routeCenter = routeRegion.center
+        let weather = await weatherService.getWeatherData(for: routeCenter)
+        let calendar = Calendar.current
+        let now = Date()
+        let hour = calendar.component(.hour, from: now)
+        let weekday = calendar.component(.weekday, from: now)
+        let isWeekend = weekday == 1 || weekday == 7
+        let timeOfDay = (hour: hour, isWeekend: isWeekend)
+        
         let riskSegments: [RoadSegment]
         
         do {
-            riskSegments = try await riskService.fetchRiskPredictions(for: routeRegion)
+            riskSegments = try await riskService.fetchRiskPredictions(
+                for: routeRegion,
+                weather: weather,
+                timeOfDay: timeOfDay
+            )
         } catch {
             // If risk data fetch fails, return route with default risk values
             print("Warning: Could not fetch risk data for route analysis: \(error.localizedDescription)")

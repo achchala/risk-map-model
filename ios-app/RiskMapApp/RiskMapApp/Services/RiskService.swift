@@ -21,7 +21,7 @@ class RiskService: ObservableObject {
     // For Device: "http://10.10.11.47:8000/api" (update IP if needed)
     
     // fetch risk predictions for region
-    func fetchRiskPredictions(for region: MKCoordinateRegion) async throws -> [RoadSegment] {
+    func fetchRiskPredictions(for region: MKCoordinateRegion, weather: WeatherData? = nil, timeOfDay: (hour: Int, isWeekend: Bool)? = nil) async throws -> [RoadSegment] {
         await MainActor.run {
             self.isLoading = true
         }
@@ -41,12 +41,46 @@ class RiskService: ObservableObject {
             request.timeoutInterval = 30.0  // 30 second timeout
             
             // send region bounds
-            let requestBody: [String: Any] = [
+            var requestBody: [String: Any] = [
                 "north": region.center.latitude + region.span.latitudeDelta / 2,
                 "south": region.center.latitude - region.span.latitudeDelta / 2,
                 "east": region.center.longitude + region.span.longitudeDelta / 2,
                 "west": region.center.longitude - region.span.longitudeDelta / 2
             ]
+            
+            // Add weather data if available
+            if let weather = weather {
+                var weatherDict: [String: Any] = [
+                    "condition": weather.condition.rawValue
+                ]
+                if let visibility = weather.visibility {
+                    weatherDict["visibility"] = visibility
+                }
+                if let precipitation = weather.precipitation {
+                    weatherDict["precipitation"] = precipitation
+                }
+                requestBody["weather"] = weatherDict
+            }
+            
+            // Add time of day data if available
+            if let timeOfDay = timeOfDay {
+                requestBody["time_of_day"] = [
+                    "hour": timeOfDay.hour,
+                    "is_weekend": timeOfDay.isWeekend
+                ]
+            } else {
+                // Use current time if not provided
+                let calendar = Calendar.current
+                let now = Date()
+                let hour = calendar.component(.hour, from: now)
+                let weekday = calendar.component(.weekday, from: now)
+                let isWeekend = weekday == 1 || weekday == 7
+                
+                requestBody["time_of_day"] = [
+                    "hour": hour,
+                    "is_weekend": isWeekend
+                ]
+            }
             
             request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
             

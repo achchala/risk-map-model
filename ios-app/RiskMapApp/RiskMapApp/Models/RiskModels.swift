@@ -255,6 +255,58 @@ struct RouteComparison {
     }
 }
 
+// MARK: - Weather Data Model
+struct WeatherData: Codable {
+    let condition: WeatherCondition
+    let temperature: Double
+    let visibility: Double? // in km
+    let windSpeed: Double? // in km/h
+    let precipitation: Double? // in mm
+    
+    enum WeatherCondition: String, Codable {
+        case clear = "clear"
+        case cloudy = "cloudy"
+        case rain = "rain"
+        case heavyRain = "heavy_rain"
+        case snow = "snow"
+        case heavySnow = "heavy_snow"
+        case fog = "fog"
+        case mist = "mist"
+        case thunderstorm = "thunderstorm"
+        case sleet = "sleet"
+        
+        var riskMultiplier: Double {
+            switch self {
+            case .clear: return 1.0
+            case .cloudy: return 1.05
+            case .mist: return 1.1
+            case .rain: return 1.2
+            case .heavyRain: return 1.4
+            case .snow: return 1.5
+            case .heavySnow: return 1.8
+            case .fog: return 1.6
+            case .thunderstorm: return 1.5
+            case .sleet: return 1.7
+            }
+        }
+        
+        var displayName: String {
+            switch self {
+            case .clear: return "Clear"
+            case .cloudy: return "Cloudy"
+            case .mist: return "Mist"
+            case .rain: return "Rain"
+            case .heavyRain: return "Heavy Rain"
+            case .snow: return "Snow"
+            case .heavySnow: return "Heavy Snow"
+            case .fog: return "Fog"
+            case .thunderstorm: return "Thunderstorm"
+            case .sleet: return "Sleet"
+            }
+        }
+    }
+}
+
 // API error
 enum APIError: Error, LocalizedError {
     case invalidURL
