@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 MODELS_DIR = PROJECT_ROOT / "models"
+CACHE_DIR = OUTPUTS_DIR / "cache"
 
 # Data file names
 COLLISION_DATA_FILE = "Traffic_Collisions_Open_Data_2437597425626428496.xlsx"
@@ -59,6 +60,10 @@ SEASON_MAPPING = {
     6: 'summer', 7: 'summer', 8: 'summer',
     9: 'fall', 10: 'fall', 11: 'fall'
 }
+
+# Weather integration parameters
+WEATHER_CACHE_PATH = CACHE_DIR / "weather_cache.parquet"
+WEATHER_GRID_SIZE = 0.01  # ~1km grid in degrees
 
 # Risk labeling rules
 RISK_LABELING_RULES = {

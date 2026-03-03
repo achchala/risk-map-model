@@ -22,6 +22,63 @@ from config import *
 
 logger = logging.getLogger(__name__)
 
+
+def verify_crs_and_distance(road_network: gpd.GeoDataFrame, buffer_distance_m: float = SPATIAL_BUFFER_DISTANCE) -> bool:
+    """
+    Verify that the road network CRS and buffer distance are configured correctly.
+
+    This helps catch subtle bugs where distance-based joins are performed in
+    degrees instead of meters.
+    """
+    # 1. Check CRS is set
+    if road_network.crs is None:
+        raise ValueError("Road network CRS is not set")
+
+    # 2. Convert to projected CRS (meters) for distance calculations
+    road_proj = road_network.to_crs("EPSG:32617")  # UTM Zone 17N (Toronto)
+
+    # 3. Verify buffer distance behaves like meters
+    test_point = road_proj.geometry.iloc[0].centroid
+    test_buffer = test_point.buffer(buffer_distance_m)
+    buffer_area = test_buffer.area
+
+    # Expected area for circular buffer: π · r²
+    expected_area = np.pi * buffer_distance_m**2
+    if abs(buffer_area - expected_area) > 100:  # ~100 m² tolerance
+        raise ValueError(
+            f"Buffer distance appears incorrect. Expected area ~{expected_area:.0f} m², "
+            f"got {buffer_area:.0f} m²."
+        )
+
+    logger.info(
+        "CRS verified: %s, buffer distance %.1fm confirmed",
+        road_network.crs,
+        buffer_distance_m,
+    )
+    return True
+
+
+def _ensure_stable_segment_id(road_network: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Ensure a stable segment_id column exists, preferring CENTRELINE_ID.
+
+    This is critical so that segment IDs remain consistent across:
+    - event-level assignments
+    - panel dataset construction
+    - modeling
+    - routing graph construction
+    """
+    road_segments = road_network.copy()
+
+    if "CENTRELINE_ID" in road_segments.columns:
+        road_segments["segment_id"] = road_segments["CENTRELINE_ID"]
+    else:
+        # Fall back to an index-based ID, but keep it stable and string-typed
+        if "segment_id" not in road_segments.columns:
+            road_segments["segment_id"] = road_segments.index.astype(str)
+
+    return road_segments
+
 def perform_spatial_join_fast(collision_data: gpd.GeoDataFrame, 
                              ksi_data: gpd.GeoDataFrame, 
                              road_network: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -36,14 +93,12 @@ def perform_spatial_join_fast(collision_data: gpd.GeoDataFrame,
     Returns:
         GeoDataFrame with crash data joined to road segments
     """
-    logger.info("Starting fast spatial join process...")
+    logger.info("Starting fast spatial join process (aggregate counts)...")
     
-    # Create a copy of road network to avoid modifying original
-    road_segments = road_network.copy()
-    
-    # Add unique segment ID if not present
-    if 'segment_id' not in road_segments.columns:
-        road_segments['segment_id'] = range(len(road_segments))
+    # Create a copy of road network to avoid modifying original and
+    # ensure we have a stable segment_id (prefer CENTRELINE_ID).
+    road_segments = _ensure_stable_segment_id(road_network)
+    verify_crs_and_distance(road_segments, SPATIAL_BUFFER_DISTANCE)
     
     # Initialize crash counts
     road_segments['num_total_crashes'] = 0
@@ -82,6 +137,213 @@ def perform_spatial_join_fast(collision_data: gpd.GeoDataFrame,
     logger.info(f"Road segments with crashes: {len(road_segments[road_segments['num_total_crashes'] > 0])}")
     
     return road_segments
+
+
+def _compute_event_fatalities(points_gdf: gpd.GeoDataFrame, crash_type: str) -> pd.Series:
+    """
+    Compute fatalities for each crash event in a vectorized way.
+
+    Logic mirrors the per-point counting in _count_crashes_fast but returns
+    a per-row integer Series instead of aggregated counts.
+    """
+    if crash_type == "collision":
+        injury_col = COLLISION_COLUMNS.get("injury", "INJURY")
+        fatalities_col = COLLISION_COLUMNS.get("fatalities", "FATALITIES")
+    else:
+        injury_col = KSI_COLUMNS.get("injury", "INJURY")
+        fatalities_col = KSI_COLUMNS.get("fatalities", "FATAL_NO")
+
+    fatalities = pd.Series(0, index=points_gdf.index, dtype="int64")
+
+    # 1) Use explicit fatalities column where available
+    if fatalities_col in points_gdf.columns:
+        raw = points_gdf[fatalities_col]
+        # Try numeric first
+        numeric = pd.to_numeric(raw, errors="coerce")
+        numeric = numeric.fillna(0)
+        numeric[numeric < 0] = 0
+        fatalities = numeric.astype("int64")
+
+    # 2) If fatalities still zero, fall back to injury text containing "Fatal"
+    if injury_col in points_gdf.columns:
+        injury_str = points_gdf[injury_col].astype(str).str.lower()
+        fatal_mask = injury_str.str.contains("fatal", na=False) & (fatalities == 0)
+        fatalities.loc[fatal_mask] = 1
+
+    return fatalities
+
+
+def perform_spatial_join_event_level(
+    collision_data: gpd.GeoDataFrame,
+    ksi_data: gpd.GeoDataFrame,
+    road_network: gpd.GeoDataFrame,
+) -> gpd.GeoDataFrame:
+    """
+    Event-level spatial join between crash points and road segments.
+
+    Output schema (one row per crash event that can be assigned to a segment):
+        - segment_id (stable, based on CENTRELINE_ID where available)
+        - event_datetime (timestamp combining date + time)
+        - crash_type ('collision' or 'ksi')
+        - is_ksi (boolean)
+        - fatalities (integer count)
+        - geometry (Point, original CRS)
+    """
+    logger.info("Starting event-level spatial join process...")
+
+    # 1. Ensure stable segment_id and verify CRS / distance behaviour
+    road_segments = _ensure_stable_segment_id(road_network)
+    verify_crs_and_distance(road_segments, SPATIAL_BUFFER_DISTANCE)
+
+    # 2. Build BallTree on road centroids in projected CRS
+    road_proj = road_segments.to_crs("EPSG:32617")
+    road_centroids = road_proj.geometry.centroid
+    road_coords = np.array([[p.x, p.y] for p in road_centroids])
+    tree = BallTree(road_coords, metric="euclidean")
+
+    assignments = []
+
+    # Helper to process one crash dataset
+    def _assign_events(
+        crashes: gpd.GeoDataFrame,
+        crash_type: str,
+    ) -> pd.DataFrame:
+        if crashes is None or crashes.empty:
+            return pd.DataFrame(
+                columns=[
+                    "segment_id",
+                    "event_datetime",
+                    "crash_type",
+                    "is_ksi",
+                    "fatalities",
+                    "geometry",
+                ]
+            )
+
+        logger.info("Processing %d %s events for event-level join...", len(crashes), crash_type)
+
+        # 2a. Compute event_datetime (DATE + HOUR or DATE + TIME in minutes)
+        df = crashes.copy()
+        if crash_type == "collision":
+            date_col = COLLISION_COLUMNS.get("date", "OCC_DATE")
+            hour_col = COLLISION_COLUMNS.get("time", "OCC_HOUR")
+            hours = pd.to_numeric(df[hour_col], errors="coerce")
+            df["event_datetime"] = pd.to_datetime(df[date_col], errors="coerce") + pd.to_timedelta(
+                hours, unit="h"
+            )
+            is_ksi_flag = False
+        else:
+            date_col = KSI_COLUMNS.get("date", "DATE")
+            time_col = KSI_COLUMNS.get("time", "TIME")
+            minutes = pd.to_numeric(df[time_col], errors="coerce")
+            df["event_datetime"] = pd.to_datetime(df[date_col], errors="coerce") + pd.to_timedelta(
+                minutes, unit="m"
+            )
+            is_ksi_flag = True
+
+        # Drop any rows where we failed to construct event_datetime
+        before = len(df)
+        df = df.dropna(subset=["event_datetime"])
+        logger.info(
+            "After datetime cleaning: %d %s events (dropped %d)",
+            len(df),
+            crash_type,
+            before - len(df),
+        )
+
+        if df.empty:
+            return pd.DataFrame(
+                columns=[
+                    "segment_id",
+                    "event_datetime",
+                    "crash_type",
+                    "is_ksi",
+                    "fatalities",
+                    "geometry",
+                ]
+            )
+
+        # 2b. Project crash points for distance queries
+        points_proj = df.to_crs("EPSG:32617")
+        point_coords = np.array([[p.x, p.y] for p in points_proj.geometry])
+
+        # 2c. Nearest segment for each crash
+        distances, indices = tree.query(point_coords, k=1)
+        distances = distances.flatten()
+        indices = indices.flatten()
+
+        within_buffer = distances <= SPATIAL_BUFFER_DISTANCE
+        if not np.any(within_buffer):
+            logger.info("No %s events found within %.1fm buffer of any segment.", crash_type, SPATIAL_BUFFER_DISTANCE)
+            return pd.DataFrame(
+                columns=[
+                    "segment_id",
+                    "event_datetime",
+                    "crash_type",
+                    "is_ksi",
+                    "fatalities",
+                    "geometry",
+                ]
+            )
+
+        valid_indices = indices[within_buffer]
+        valid_rows = df.iloc[np.where(within_buffer)[0]].copy()
+
+        logger.info(
+            "Assigned %d of %d %s events to segments within %.1fm.",
+            len(valid_rows),
+            len(df),
+            crash_type,
+            SPATIAL_BUFFER_DISTANCE,
+        )
+
+        # 2d. Compute fatalities per event
+        fatalities = _compute_event_fatalities(valid_rows, crash_type=crash_type)
+
+        # 2e. Build event-level assignment DataFrame (vectorized)
+        segment_ids = road_segments.iloc[valid_indices]["segment_id"].values
+        event_df = pd.DataFrame(
+            {
+                "segment_id": segment_ids,
+                "event_datetime": valid_rows["event_datetime"].values,
+                "crash_type": crash_type,
+                "is_ksi": is_ksi_flag,
+                "fatalities": fatalities.values,
+                "geometry": valid_rows.geometry.values,
+            }
+        )
+
+        return event_df
+
+    # Process collision and KSI datasets
+    collision_assignments = _assign_events(collision_data, "collision")
+    ksi_assignments = _assign_events(ksi_data, "ksi")
+
+    if not collision_assignments.empty:
+        assignments.append(collision_assignments)
+    if not ksi_assignments.empty:
+        assignments.append(ksi_assignments)
+
+    if not assignments:
+        logger.warning("No event-level crash assignments produced.")
+        return gpd.GeoDataFrame(
+            columns=[
+                "segment_id",
+                "event_datetime",
+                "crash_type",
+                "is_ksi",
+                "fatalities",
+                "geometry",
+            ],
+            geometry="geometry",
+            crs=road_network.crs,
+        )
+
+    all_events = pd.concat(assignments, ignore_index=True)
+    event_gdf = gpd.GeoDataFrame(all_events, geometry="geometry", crs=road_network.crs)
+
+    logger.info("Event-level spatial join completed with %d crash events.", len(event_gdf))
+    return event_gdf
 
 def _count_crashes_fast(points_gdf: gpd.GeoDataFrame, 
                        road_coords: np.ndarray,

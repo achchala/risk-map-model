@@ -13,7 +13,8 @@ import pickle
 import sys
 from typing import Tuple, Dict, Any, Optional
 import warnings
-warnings.filterwarnings('ignore')
+
+warnings.filterwarnings("ignore")
 
 # ML libraries
 from sklearn.ensemble import RandomForestClassifier
@@ -22,9 +23,17 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 from sklearn.utils.class_weight import compute_class_weight
 
+# Count-regression / temporal modeling
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.isotonic import IsotonicRegression
+
 # Add parent directory to path for config import
 sys.path.append(str(Path(__file__).parent.parent.parent))
-from config import *
+from config import *  # noqa: F401,F403
+from src.feature_engineering.panel_builder import (  # type: ignore
+    PanelConfig,
+    temporal_train_val_test_split,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +343,254 @@ class ModelTrainer:
         predictions = self.model.predict(X_scaled)
         
         return predictions
+
+
+class TemporalCountModelTrainer:
+    """
+    Trainer for count-based crash models on temporal panel data.
+
+    This class is designed to work with the panel produced by
+    `feature_engineering.panel_builder.build_panel_dataset` and trains
+    a model that outputs an approximate crash rate λ (crashes per window,
+    which can be converted to crashes/hour).
+    """
+
+    def __init__(self, random_state: int = 42, panel_config: Optional[PanelConfig] = None):
+        self.random_state = random_state
+        self.panel_config = panel_config or PanelConfig()
+        self.model: Optional[HistGradientBoostingRegressor] = None
+        self.scaler = StandardScaler()
+        self.feature_columns: list[str] = []
+        self.cv_scores: Optional[np.ndarray] = None
+        self.calibrator: Optional[IsotonicRegression] = None
+
+    def prepare_panel_features(
+        self,
+        panel: pd.DataFrame,
+        target_col: str = "future_crash_count",
+        explicit_feature_cols: Optional[list[str]] = None,
+    ) -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        Prepare features and target from a temporal panel.
+
+        Excludes:
+        - identifiers and time columns
+        - outcome columns that would leak if used as features
+        """
+        logger.info("Preparing panel features for temporal count model training...")
+
+        if target_col not in panel.columns:
+            raise ValueError(f"Target column '{target_col}' not found in panel.")
+
+        exclude = {
+            "segment_id",
+            "window_start",
+            "future_window_start",
+            "datetime_hour",
+            "lat_grid",
+            "lon_grid",
+            # Outcome variables (do not use as predictors)
+            "crash_count",
+            "future_crash_count",
+            "is_ksi",
+            "fatalities",
+            # Training-only metadata
+            "sample_weight",
+        }
+
+        if explicit_feature_cols is not None:
+            feature_cols = [c for c in explicit_feature_cols if c not in exclude]
+        else:
+            feature_cols = [c for c in panel.columns if c not in exclude]
+
+        X = panel[feature_cols].copy()
+        y = panel[target_col].astype(float).copy()
+
+        # Handle missing values and ensure numeric
+        X = X.fillna(0)
+        for col in X.columns:
+            if X[col].dtype == "object":
+                X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0)
+        X = X.astype(float)
+
+        self.feature_columns = feature_cols
+        logger.info("Panel features prepared: %d features, %d samples.", len(feature_cols), len(X))
+
+        return X, y
+
+    def train_temporal_count_model(
+        self,
+        panel: pd.DataFrame,
+        target_col: str = "future_crash_count",
+        sample_weight_col: Optional[str] = None,
+        use_hyperparameter_tuning: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Train a temporal count model using ordered window_start splits.
+
+        - Uses temporal_train_val_test_split for realistic evaluation
+        - Trains HistGradientBoostingRegressor with Poisson loss to approximate λ
+        """
+        # Temporal split
+        train_data, val_data, test_data = temporal_train_val_test_split(panel)
+
+        # Prepare features/targets
+        X_train, y_train = self.prepare_panel_features(
+            train_data, target_col=target_col
+        )
+        X_val, y_val = self.prepare_panel_features(
+            val_data, target_col=target_col
+        )
+        X_test, y_test = self.prepare_panel_features(
+            test_data, target_col=target_col
+        )
+
+        # Scale features
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_val_scaled = self.scaler.transform(X_val)
+        X_test_scaled = self.scaler.transform(X_test)
+
+        # Optional sample weights (e.g. for sampled zero windows)
+        sample_weight_train = None
+        if sample_weight_col is not None and sample_weight_col in train_data.columns:
+            sample_weight_train = train_data[sample_weight_col].astype(float).values
+
+        if use_hyperparameter_tuning:
+            # Simple manual search over a few key parameters
+            candidates = [
+                {"max_depth": 5, "learning_rate": 0.1, "max_iter": 300},
+                {"max_depth": 7, "learning_rate": 0.05, "max_iter": 400},
+            ]
+            best_cfg = None
+            best_score = -np.inf
+            for cfg in candidates:
+                model = HistGradientBoostingRegressor(
+                    loss="poisson",
+                    max_depth=cfg["max_depth"],
+                    learning_rate=cfg["learning_rate"],
+                    max_iter=cfg["max_iter"],
+                    random_state=self.random_state,
+                )
+                model.fit(X_train_scaled, y_train, sample_weight=sample_weight_train)
+                val_pred = model.predict(X_val_scaled)
+                # Negative RMSE as score (we want to minimize RMSE)
+                rmse = np.sqrt(np.mean((val_pred - y_val) ** 2))
+                score = -rmse
+                logger.info("Config %s → val RMSE=%.4f", cfg, rmse)
+                if score > best_score:
+                    best_score = score
+                    best_cfg = cfg
+                    self.model = model
+            logger.info("Best temporal count model config: %s", best_cfg)
+        else:
+            self.model = HistGradientBoostingRegressor(
+                loss="poisson",
+                max_depth=6,
+                learning_rate=0.1,
+                max_iter=300,
+                random_state=self.random_state,
+            )
+            self.model.fit(X_train_scaled, y_train, sample_weight=sample_weight_train)
+
+        # Evaluate on test set
+        y_pred = self.model.predict(X_test_scaled)  # type: ignore[arg-type]
+        mae = np.mean(np.abs(y_pred - y_test))
+        rmse = np.sqrt(np.mean((y_pred - y_test) ** 2))
+
+        # Very simple Poisson deviance approximation (guard against zeros)
+        eps = 1e-9
+        y_true_clipped = np.maximum(y_test, eps)
+        y_pred_clipped = np.maximum(y_pred, eps)
+        poisson_deviance = 2 * np.mean(
+            y_pred_clipped - y_true_clipped + y_true_clipped * np.log(y_true_clipped / y_pred_clipped)
+        )
+
+        # Calibration on validation set (probability that a window has ≥1 crash)
+        lambda_val = self.model.predict(X_val_scaled)  # type: ignore[arg-type]
+        lambda_val = np.clip(lambda_val, 0.0, None)
+        P_val_raw = 1.0 - np.exp(-lambda_val)  # probability of ≥1 crash in the window
+        y_val_binary = (y_val > 0).astype(int)
+
+        self.calibrator = IsotonicRegression(out_of_bounds="clip")
+        self.calibrator.fit(P_val_raw, y_val_binary)
+
+        results = {
+            "mae": mae,
+            "rmse": rmse,
+            "poisson_deviance": poisson_deviance,
+            "y_test": y_test,
+            "y_pred": y_pred,
+            "X_test": X_test,
+            "feature_columns": self.feature_columns,
+            "calibration": {
+                "fitted": True,
+            },
+        }
+
+        logger.info(
+            "Temporal count model evaluation — MAE=%.4f, RMSE=%.4f, Poisson dev=%.4f",
+            mae,
+            rmse,
+            poisson_deviance,
+        )
+
+        return results
+
+    def save_model(self, filepath: str) -> None:
+        """Persist temporal count model and metadata."""
+        model_data = {
+            "model": self.model,
+            "scaler": self.scaler,
+            "feature_columns": self.feature_columns,
+            "panel_config": self.panel_config,
+            "calibrator": self.calibrator,
+        }
+        with open(filepath, "wb") as f:
+            pickle.dump(model_data, f)
+        logger.info("Temporal count model saved to %s", filepath)
+
+    def load_model(self, filepath: str) -> None:
+        """Load temporal count model."""
+        with open(filepath, "rb") as f:
+            model_data = pickle.load(f)
+        self.model = model_data["model"]
+        self.scaler = model_data["scaler"]
+        self.feature_columns = model_data["feature_columns"]
+        self.panel_config = model_data.get("panel_config", PanelConfig())
+        self.calibrator = model_data.get("calibrator", None)
+        logger.info("Temporal count model loaded from %s", filepath)
+
+    def predict_lambda(self, X: pd.DataFrame) -> np.ndarray:
+        """
+        Predict crash counts per window (λ_window) for new data.
+
+        Caller is responsible for converting to crashes/hour or to traversal
+        probability (e.g., λ_hour = λ_window / window_size_hours).
+        """
+        if self.model is None:
+            raise ValueError("Model not trained. Call train_temporal_count_model() first.")
+
+        X = X[self.feature_columns].fillna(0)
+        for col in X.columns:
+            if X[col].dtype == "object":
+                X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0)
+        X = X.astype(float)
+        X_scaled = self.scaler.transform(X)
+        return self.model.predict(X_scaled)  # type: ignore[arg-type]
+
+    def lambda_to_window_probability(self, lambda_window: np.ndarray) -> np.ndarray:
+        """
+        Convert λ_window (expected crashes per window) to probability of ≥1 crash
+        in the window, applying isotonic calibration if available.
+
+        P_raw = 1 - exp(-λ_window)
+        """
+        lambda_window = np.clip(lambda_window, 0.0, None)
+        P_raw = 1.0 - np.exp(-lambda_window)
+        if self.calibrator is not None:
+            return self.calibrator.transform(P_raw)
+        return P_raw
+
 
 def test_model_trainer():
     """
