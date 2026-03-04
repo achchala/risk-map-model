@@ -108,7 +108,10 @@ def main() -> None:
 
     # 5) Train temporal count model using future-looking labels and sample weights
     logger.info("Training TemporalCountModelTrainer...")
-    trainer = TemporalCountModelTrainer(panel_config=panel_config)
+    trainer = TemporalCountModelTrainer(
+        panel_config=panel_config,
+        lambda_cap=50.0,  # cap λ (crashes per segment-week) for stability and routing
+    )
     results = trainer.train_temporal_count_model(
         training_panel,
         target_col="future_crash_count",
@@ -126,6 +129,20 @@ def main() -> None:
     model_path = models_dir / "toronto_temporal_count_model.pkl"
     trainer.save_model(str(model_path))
     logger.info("Saved temporal count model to %s", model_path)
+
+    # 7) Save test-set results for diagnostics and outlier inspection
+    import numpy as np
+    diagnostics_path = reports_dir / "temporal_model_test_results.npz"
+    np.savez(
+        diagnostics_path,
+        y_test=np.asarray(results["y_test"]),
+        y_pred=np.asarray(results["y_pred"]),
+        mean_train_y=np.array(results["mean_train_y"]),
+    )
+    logger.info("Saved test results for diagnostics to %s", diagnostics_path)
+    test_set_path = reports_dir / "temporal_model_test_set_with_pred.parquet"
+    results["test_data_with_pred"].to_parquet(test_set_path, index=False)
+    logger.info("Saved test set with predictions for outlier inspection to %s", test_set_path)
 
     logger.info("Temporal model training pipeline completed successfully.")
 

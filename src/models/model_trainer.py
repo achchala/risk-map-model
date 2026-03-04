@@ -355,9 +355,15 @@ class TemporalCountModelTrainer:
     which can be converted to crashes/hour).
     """
 
-    def __init__(self, random_state: int = 42, panel_config: Optional[PanelConfig] = None):
+    def __init__(
+        self,
+        random_state: int = 42,
+        panel_config: Optional[PanelConfig] = None,
+        lambda_cap: Optional[float] = 50.0,
+    ):
         self.random_state = random_state
         self.panel_config = panel_config or PanelConfig()
+        self.lambda_cap = lambda_cap  # cap predicted λ (crashes per window) for stability and routing
         self.model: Optional[HistGradientBoostingRegressor] = None
         self.scaler = StandardScaler()
         self.feature_columns: list[str] = []
@@ -492,8 +498,11 @@ class TemporalCountModelTrainer:
             )
             self.model.fit(X_train_scaled, y_train, sample_weight=sample_weight_train)
 
-        # Evaluate on test set
+        # Evaluate on test set (apply prediction cap for stability)
         y_pred = self.model.predict(X_test_scaled)  # type: ignore[arg-type]
+        y_pred = np.clip(y_pred, 0.0, None)
+        if self.lambda_cap is not None:
+            y_pred = np.clip(y_pred, 0.0, self.lambda_cap)
         mae = np.mean(np.abs(y_pred - y_test))
         rmse = np.sqrt(np.mean((y_pred - y_test) ** 2))
 
@@ -514,12 +523,18 @@ class TemporalCountModelTrainer:
         self.calibrator = IsotonicRegression(out_of_bounds="clip")
         self.calibrator.fit(P_val_raw, y_val_binary)
 
+        # Attach test set with predictions for outlier inspection
+        test_data_with_pred = test_data.copy()
+        test_data_with_pred["y_pred"] = y_pred
+
         results = {
             "mae": mae,
             "rmse": rmse,
             "poisson_deviance": poisson_deviance,
             "y_test": y_test,
             "y_pred": y_pred,
+            "mean_train_y": float(np.mean(y_train)),
+            "test_data_with_pred": test_data_with_pred,
             "X_test": X_test,
             "feature_columns": self.feature_columns,
             "calibration": {
@@ -544,6 +559,7 @@ class TemporalCountModelTrainer:
             "feature_columns": self.feature_columns,
             "panel_config": self.panel_config,
             "calibrator": self.calibrator,
+            "lambda_cap": self.lambda_cap,
         }
         with open(filepath, "wb") as f:
             pickle.dump(model_data, f)
@@ -558,12 +574,14 @@ class TemporalCountModelTrainer:
         self.feature_columns = model_data["feature_columns"]
         self.panel_config = model_data.get("panel_config", PanelConfig())
         self.calibrator = model_data.get("calibrator", None)
+        self.lambda_cap = model_data.get("lambda_cap", 50.0)
         logger.info("Temporal count model loaded from %s", filepath)
 
     def predict_lambda(self, X: pd.DataFrame) -> np.ndarray:
         """
         Predict crash counts per window (λ_window) for new data.
 
+        Predictions are clipped to [0, lambda_cap] when lambda_cap is set.
         Caller is responsible for converting to crashes/hour or to traversal
         probability (e.g., λ_hour = λ_window / window_size_hours).
         """
@@ -576,7 +594,11 @@ class TemporalCountModelTrainer:
                 X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0)
         X = X.astype(float)
         X_scaled = self.scaler.transform(X)
-        return self.model.predict(X_scaled)  # type: ignore[arg-type]
+        pred = self.model.predict(X_scaled)  # type: ignore[arg-type]
+        pred = np.clip(pred, 0.0, None)
+        if self.lambda_cap is not None:
+            pred = np.clip(pred, 0.0, self.lambda_cap)
+        return pred
 
     def lambda_to_window_probability(self, lambda_window: np.ndarray) -> np.ndarray:
         """
