@@ -154,6 +154,74 @@ def _attach_weather_features(
     return merged
 
 
+def _compute_lag_features_from_sparse(
+    panel: pd.DataFrame,
+    crash_counts_sparse: pd.DataFrame,
+    window_size_hours: int,
+) -> pd.DataFrame:
+    """
+    Add past-only lag and rolling features by joining against a sparse
+    crash-count lookup table keyed by (segment_id, window_start).
+
+    Works correctly for both sampled (sparse) and dense panels, unlike a
+    shift-based approach which requires every segment×window to exist.
+
+    Column names match the dense-panel builder for compatibility:
+        past_crash_count_1h, past_crash_count_24h, past_crash_count_7d,
+        rolling_mean_7d, rolling_max_30d
+    """
+    panel = panel.copy()
+    delta = pd.Timedelta(hours=window_size_hours)
+
+    sparse = crash_counts_sparse[["segment_id", "window_start", "crash_count"]].drop_duplicates(
+        subset=["segment_id", "window_start"]
+    )
+
+    steps_24h = max(1, int(round(24 / window_size_hours)))
+    steps_7d = max(1, int(round(24 * 7 / window_size_hours)))
+    window_30d = max(1, int(round(24 * 30 / window_size_hours)))
+
+    # Build shifted lookup for each lag step.  Shifting the sparse table
+    # *forward* by k steps means: "crash_count from k windows ago."
+    lag_frames = {}
+    for k in range(1, window_30d + 1):
+        shifted = sparse.copy()
+        shifted["window_start"] = shifted["window_start"] + k * delta
+        lag_frames[k] = shifted.rename(columns={"crash_count": f"_lag_{k}"})
+
+    lag_table = lag_frames[1][["segment_id", "window_start", "_lag_1"]]
+    for k in range(2, window_30d + 1):
+        lag_table = lag_table.merge(
+            lag_frames[k][["segment_id", "window_start", f"_lag_{k}"]],
+            on=["segment_id", "window_start"],
+            how="outer",
+        )
+
+    lag_cols = [f"_lag_{k}" for k in range(1, window_30d + 1)]
+    lag_table[lag_cols] = lag_table[lag_cols].fillna(0)
+
+    lag_table["past_crash_count_1h"] = lag_table["_lag_1"]
+    lag_table["past_crash_count_24h"] = lag_table[f"_lag_{steps_24h}"]
+    lag_table["past_crash_count_7d"] = lag_table[f"_lag_{steps_7d}"]
+
+    cols_7d = [f"_lag_{k}" for k in range(1, steps_7d + 1)]
+    lag_table["rolling_mean_7d"] = lag_table[cols_7d].mean(axis=1)
+    lag_table["rolling_max_30d"] = lag_table[lag_cols].max(axis=1)
+
+    feature_names = [
+        "segment_id", "window_start",
+        "past_crash_count_1h", "past_crash_count_24h", "past_crash_count_7d",
+        "rolling_mean_7d", "rolling_max_30d",
+    ]
+    lag_table = lag_table[feature_names]
+
+    panel = panel.merge(lag_table, on=["segment_id", "window_start"], how="left")
+    for c in feature_names[2:]:
+        panel[c] = panel[c].fillna(0)
+
+    return panel
+
+
 def build_panel_dataset(
     event_level_crashes: gpd.GeoDataFrame,
     road_network: gpd.GeoDataFrame,
@@ -206,33 +274,23 @@ def build_panel_dataset(
     )
 
     # 2. Aggregate crashes per (segment_id, window_start)
-    grouped = (
-        event_level_crashes.groupby(
-            [
-                "segment_id",
-                pd.Grouper(key="event_datetime", freq=f"{config.window_size_hours}H", label="left"),
-            ]
-        )
-        .agg(
-            {
-                "is_ksi": "sum",
-                "fatalities": "sum",
-            }
-        )
-        .rename(columns={"event_datetime": "window_start"})
-        .reset_index()
+    # origin=min_ts ensures Grouper bin edges align with the date_range grid
+    # so the left-join in step 3 actually matches.
+    grp_keys = [
+        "segment_id",
+        pd.Grouper(
+            key="event_datetime",
+            freq=f"{config.window_size_hours}H",
+            label="left",
+            origin=min_ts,
+        ),
+    ]
+    agg_df = event_level_crashes.groupby(grp_keys).agg(
+        is_ksi=("is_ksi", "sum"),
+        fatalities=("fatalities", "sum"),
     )
-    grouped = grouped.rename(columns={"event_datetime": "window_start"})
-    grouped["crash_count"] = (
-        event_level_crashes.groupby(
-            [
-                "segment_id",
-                pd.Grouper(key="event_datetime", freq=f"{config.window_size_hours}H", label="left"),
-            ]
-        )
-        .size()
-        .reset_index(drop=True)
-    )
+    agg_df["crash_count"] = event_level_crashes.groupby(grp_keys).size()
+    grouped = agg_df.reset_index().rename(columns={"event_datetime": "window_start"})
 
     # 3. Build full panel (all segments × all windows), filling missing with zeros.
     # To avoid an enormous cartesian product, restrict to segments that actually
@@ -374,7 +432,10 @@ def build_weekly_sampled_future_panel(
         horizon_hours,
     )
 
+    min_event_ts = event_level_crashes["event_datetime"].min().floor("H")
+
     # Step 1: Sparse crash counts per (segment_id, window_start)
+    # origin=min_event_ts keeps bin edges consistent with build_panel_dataset.
     crash_counts = (
         event_level_crashes.groupby(
             [
@@ -383,6 +444,7 @@ def build_weekly_sampled_future_panel(
                     key="event_datetime",
                     freq=f"{window_size_hours}H",
                     label="left",
+                    origin=min_event_ts,
                 ),
             ]
         )
@@ -478,6 +540,11 @@ def build_weekly_sampled_future_panel(
     panel["window_start"] = pd.to_datetime(panel["window_start"])
     panel = _add_temporal_indicators(panel)
     panel = _attach_weather_features(panel, weather_data=weather_data)
+
+    # Step 3b: Lag and rolling features from sparse crash history
+    panel = _compute_lag_features_from_sparse(
+        panel, crash_counts, window_size_hours
+    )
 
     # Step 4: Define future label via join on (segment_id, future_window_start)
     horizon_delta = pd.to_timedelta(horizon_hours, unit="H")

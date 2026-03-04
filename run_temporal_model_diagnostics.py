@@ -37,6 +37,11 @@ def main() -> None:
     data = np.load(diagnostics_path)
     y_test = data["y_test"]
     y_pred = data["y_pred"]
+    sample_weight_test = (
+        data["sample_weight_test"]
+        if "sample_weight_test" in data.files
+        else np.ones_like(y_test, dtype=float)
+    )
     mean_train_y = float(data["mean_train_y"])
     y_pred = np.clip(y_pred, 0.0, None)
     n = len(y_test)
@@ -118,22 +123,55 @@ def main() -> None:
             continue
         mean_pred = y_pred[mask].mean()
         mean_actual = y_test[mask].mean()
+        mean_actual_w = np.average(y_test[mask], weights=sample_weight_test[mask])
         count = mask.sum()
-        print(f"  Bin {b+1}: n={count:,}, mean_pred={mean_pred:.4f}, mean_actual={mean_actual:.4f}")
+        print(
+            f"  Bin {b+1}: n={count:,}, mean_pred={mean_pred:.4f}, "
+            f"mean_actual={mean_actual:.4f}, weighted_mean_actual={mean_actual_w:.4f}"
+        )
 
     # ---- 7. Top-K lift: among top predicted rows, how much higher is actual crash rate? ----
     print("\n" + "=" * 60)
     print("7. TOP-K LIFT (model finding higher-risk windows?)")
     print("=" * 60)
     overall_mean = y_test.mean()
+    overall_mean_w = np.average(y_test, weights=sample_weight_test)
     print(f"  Overall mean(actual) : {overall_mean:.4f}")
+    print(f"  Weighted overall mean(actual) : {overall_mean_w:.4f}")
     order = np.argsort(y_pred)[::-1]  # descending by prediction
     for pct in (1, 5, 10):
         k = max(1, int(n * pct / 100))
         top_k_idx = order[:k]
         mean_top_k = y_test[top_k_idx].mean()
+        mean_top_k_w = np.average(y_test[top_k_idx], weights=sample_weight_test[top_k_idx])
         lift = mean_top_k / overall_mean if overall_mean > 0 else 0
-        print(f"  Top {pct}% (n={k:,}): mean(actual)={mean_top_k:.4f}, lift={lift:.2f}x")
+        lift_w = mean_top_k_w / overall_mean_w if overall_mean_w > 0 else 0
+        print(
+            f"  Top {pct}% (n={k:,}): mean(actual)={mean_top_k:.4f}, lift={lift:.2f}x, "
+            f"weighted_mean(actual)={mean_top_k_w:.4f}, weighted_lift={lift_w:.2f}x"
+        )
+
+    # ---- 8. Tail capture: true recall + precision in top predicted rows ----
+    print("\n" + "=" * 60)
+    print("8. TAIL CAPTURE (high-count windows in top predictions)")
+    print("=" * 60)
+    for threshold in (2, 3):
+        positives = y_test >= threshold
+        n_pos = int(positives.sum())
+        if n_pos == 0:
+            print(f"  y>={threshold}: no rows in test set (skip)")
+            continue
+        print(f"  y>={threshold}: n={n_pos:,}")
+        for pct in (1, 5, 10):
+            k = max(1, int(n * pct / 100))
+            top_k_idx = order[:k]
+            captured = int(positives[top_k_idx].sum())
+            recall = captured / n_pos
+            precision_at_k = captured / k
+            print(
+                f"    In top {pct}% predictions: captured={captured:,}, "
+                f"recall={recall * 100:.2f}%, precision@{pct}%={precision_at_k * 100:.2f}%"
+            )
 
     print("\nDone. For routing, prioritize: top-K lift, calibration, correlation. MAE alone is misleading with 93%+ zeros.")
 

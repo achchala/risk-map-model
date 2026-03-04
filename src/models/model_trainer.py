@@ -402,7 +402,11 @@ class TemporalCountModelTrainer:
             "fatalities",
             # Training-only metadata
             "sample_weight",
+            "sample_weight_tail",
         }
+
+        # Exclude any additional sample-weight style columns to avoid leakage.
+        exclude.update({c for c in panel.columns if c.startswith("sample_weight")})
 
         if explicit_feature_cols is not None:
             feature_cols = [c for c in explicit_feature_cols if c not in exclude]
