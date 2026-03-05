@@ -1,0 +1,4 @@
+Model,MAE,RMSE,MeanPoisDev,Pred_zeros,Actual_zeros
+Poisson,5.5413,29.2117,32.487,841,2245
+NegBin,5.5413,29.2117,32.487,841,2245
+XGBoost,10.0504,32.6265,36.2764,437,2245
