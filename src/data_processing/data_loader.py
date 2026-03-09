@@ -267,7 +267,8 @@ def load_model_dataset(data_dir: Path) -> Optional[pd.DataFrame]:
     Load optional traffic volume/speed data (model_dataset.csv) by segment.
 
     Expected columns: centreline_id, avg_daily_vol, avg_speed,
-    avg_85th_percentile_speed, speed_variance, exposure.
+    avg_85th_percentile_speed, speed_variance, exposure,
+    avg_wkdy_am_peak_vol, avg_wkdy_pm_peak_vol (optional).
     Returns None if file not found.
     """
     from config import MODEL_DATASET_FILE
@@ -292,7 +293,13 @@ def load_model_dataset(data_dir: Path) -> Optional[pd.DataFrame]:
         return None
 
     cols = ["segment_id", "avg_daily_vol", "avg_speed"]
-    for c in ["avg_85th_percentile_speed", "speed_variance", "exposure"]:
+    for c in [
+        "avg_85th_percentile_speed",
+        "speed_variance",
+        "exposure",
+        "avg_wkdy_am_peak_vol",
+        "avg_wkdy_pm_peak_vol",
+    ]:
         if c in df.columns:
             cols.append(c)
     df = df[[c for c in cols if c in df.columns]].drop_duplicates("segment_id")

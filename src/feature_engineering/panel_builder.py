@@ -189,6 +189,41 @@ def _attach_weather_features(
     return merged
 
 
+def _add_approx_hourly_vol(panel: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute hour-dependent approximate hourly volume using peak period data.
+
+    When avg_daily_vol and peak volumes exist: use AM peak (7-9) or PM peak (16-18)
+    volumes for those hours; otherwise use avg_daily_vol/24 as baseline.
+    """
+    panel = panel.copy()
+    has_hour = "hour_of_day" in panel.columns
+    has_daily = "avg_daily_vol" in panel.columns
+    has_am = "avg_wkdy_am_peak_vol" in panel.columns
+    has_pm = "avg_wkdy_pm_peak_vol" in panel.columns
+
+    baseline = (
+        panel["avg_daily_vol"].fillna(0) / 24.0
+        if has_daily
+        else pd.Series(0.0, index=panel.index)
+    )
+
+    if has_hour and (has_daily or has_am or has_pm):
+        hour = panel["hour_of_day"]
+        approx = baseline.copy()
+        if has_am:
+            am_peak = (hour >= 7) & (hour <= 9)
+            approx = approx.where(~am_peak, panel["avg_wkdy_am_peak_vol"].fillna(0))
+        if has_pm:
+            pm_peak = (hour >= 16) & (hour <= 18)
+            approx = approx.where(~pm_peak, panel["avg_wkdy_pm_peak_vol"].fillna(0))
+        panel["approx_hourly_vol"] = approx
+    else:
+        panel["approx_hourly_vol"] = baseline
+
+    return panel
+
+
 def _is_weekly_or_coarser(window_size_hours: int) -> bool:
     """True when window is weekly (168h) or coarser."""
     return window_size_hours >= 24 * 6
@@ -423,6 +458,8 @@ def build_panel_dataset(
         "avg_85th_percentile_speed",
         "speed_variance",
         "exposure",
+        "avg_wkdy_am_peak_vol",
+        "avg_wkdy_pm_peak_vol",
     ]:
         if adt_col in road_network.columns:
             static_cols.append(adt_col)
@@ -437,6 +474,7 @@ def build_panel_dataset(
     # 5. Temporal indicators
     panel["window_start"] = pd.to_datetime(panel["window_start"])
     panel = _add_temporal_indicators(panel, config.window_size_hours)
+    panel = _add_approx_hourly_vol(panel)
 
     # 6. Optional weather features
     panel = _attach_weather_features(panel, weather_data=weather_data)
@@ -655,6 +693,8 @@ def build_weekly_sampled_future_panel(
         "avg_85th_percentile_speed",
         "speed_variance",
         "exposure",
+        "avg_wkdy_am_peak_vol",
+        "avg_wkdy_pm_peak_vol",
     ]:
         if adt_col in road_network.columns:
             static_cols.append(adt_col)
@@ -668,6 +708,7 @@ def build_weekly_sampled_future_panel(
 
     panel["window_start"] = pd.to_datetime(panel["window_start"])
     panel = _add_temporal_indicators(panel, window_size_hours)
+    panel = _add_approx_hourly_vol(panel)
     panel = _attach_weather_features(panel, weather_data=weather_data)
 
     # Step 3b: Lag and rolling features from sparse crash history
@@ -738,12 +779,53 @@ def build_sampled_future_panel(
     )
 
 
+def build_crash_counts_sparse(
+    event_level_crashes: gpd.GeoDataFrame,
+    window_size_hours: int = 1,
+) -> pd.DataFrame:
+    """
+    Build sparse crash counts per (segment_id, window_start) from event-level data.
+
+    Returns DataFrame with columns: segment_id, window_start, crash_count.
+    Used for inference panel building and for on-demand datetime-based inference.
+    """
+    if event_level_crashes.empty:
+        return pd.DataFrame(columns=["segment_id", "window_start", "crash_count"])
+
+    required_cols = {"segment_id", "event_datetime"}
+    if not required_cols.issubset(event_level_crashes.columns):
+        missing = required_cols - set(event_level_crashes.columns)
+        raise ValueError(f"event_level_crashes missing required columns: {missing}")
+
+    min_event_ts = event_level_crashes["event_datetime"].min().floor("H")
+
+    crash_counts = (
+        event_level_crashes.groupby(
+            [
+                "segment_id",
+                pd.Grouper(
+                    key="event_datetime",
+                    freq=f"{window_size_hours}H",
+                    label="left",
+                    origin=min_event_ts,
+                ),
+            ]
+        )
+        .size()
+        .reset_index(name="crash_count")
+        .rename(columns={"event_datetime": "window_start"})
+    )
+    crash_counts["window_start"] = pd.to_datetime(crash_counts["window_start"])
+    return crash_counts
+
+
 def build_latest_window_inference_panel(
     event_level_crashes: gpd.GeoDataFrame,
     road_network: gpd.GeoDataFrame,
     weather_data: Optional[pd.DataFrame] = None,
     window_size_hours: int = 1,
     config: Optional[PanelConfig] = None,
+    crash_counts_sparse: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Build an inference panel for only the latest window: one row per segment.
@@ -766,25 +848,12 @@ def build_latest_window_inference_panel(
             window_size_hours=window_size_hours, horizon_hours=window_size_hours
         )
 
-    min_event_ts = event_level_crashes["event_datetime"].min().floor("H")
-
-    crash_counts = (
-        event_level_crashes.groupby(
-            [
-                "segment_id",
-                pd.Grouper(
-                    key="event_datetime",
-                    freq=f"{config.window_size_hours}H",
-                    label="left",
-                    origin=min_event_ts,
-                ),
-            ]
+    if crash_counts_sparse is None or crash_counts_sparse.empty:
+        crash_counts = build_crash_counts_sparse(
+            event_level_crashes, config.window_size_hours
         )
-        .size()
-        .reset_index(name="crash_count")
-        .rename(columns={"event_datetime": "window_start"})
-    )
-    crash_counts["window_start"] = pd.to_datetime(crash_counts["window_start"])
+    else:
+        crash_counts = crash_counts_sparse
 
     latest_window = crash_counts["window_start"].max()
     all_segments = road_network["segment_id"].unique()
@@ -811,6 +880,8 @@ def build_latest_window_inference_panel(
         "avg_85th_percentile_speed",
         "speed_variance",
         "exposure",
+        "avg_wkdy_am_peak_vol",
+        "avg_wkdy_pm_peak_vol",
     ]:
         if c in road_network.columns:
             static_cols.append(c)
@@ -822,6 +893,7 @@ def build_latest_window_inference_panel(
     panel = panel.merge(centroids, on="segment_id", how="left")
     panel["window_start"] = pd.to_datetime(panel["window_start"])
     panel = _add_temporal_indicators(panel, config.window_size_hours)
+    panel = _add_approx_hourly_vol(panel)
     panel = _attach_weather_features(panel, weather_data=weather_data)
     panel = _compute_lag_features_from_sparse(
         panel, crash_counts, config.window_size_hours
@@ -832,6 +904,87 @@ def build_latest_window_inference_panel(
         "Built latest-window inference panel: %d segments, window %s",
         len(panel),
         latest_window,
+    )
+    return panel
+
+
+def build_inference_panel_for_datetime(
+    crash_counts_sparse: pd.DataFrame,
+    road_network: gpd.GeoDataFrame,
+    weather_data: Optional[pd.DataFrame] = None,
+    target_datetime: Optional[pd.Timestamp] = None,
+    config: Optional[PanelConfig] = None,
+) -> pd.DataFrame:
+    """
+    Build an inference panel for an arbitrary target datetime.
+    Used for on-demand risk prediction with current-time awareness.
+
+    Args:
+        crash_counts_sparse: DataFrame with segment_id, window_start, crash_count
+        road_network: Road network with static features
+        weather_data: Historical weather (join by datetime_hour)
+        target_datetime: Time to predict for; defaults to latest window in crash data
+        config: Panel config (window_size_hours); defaults to 1h
+    """
+    if config is None:
+        config = PanelConfig(window_size_hours=1, horizon_hours=1)
+
+    window_hours = config.window_size_hours
+    if target_datetime is not None:
+        target_ts = pd.Timestamp(target_datetime).tz_localize(None)
+        target_window = target_ts.floor(f"{window_hours}H")
+    elif crash_counts_sparse is not None and not crash_counts_sparse.empty:
+        target_window = crash_counts_sparse["window_start"].max()
+    else:
+        raise ValueError("Must provide target_datetime or non-empty crash_counts_sparse")
+
+    all_segments = road_network["segment_id"].unique()
+    inference_idx = pd.DataFrame(
+        {"segment_id": all_segments, "window_start": target_window}
+    )
+    inference_idx = inference_idx.merge(
+        crash_counts_sparse[["segment_id", "window_start", "crash_count"]],
+        on=["segment_id", "window_start"],
+        how="left",
+    )
+    inference_idx["crash_count"] = inference_idx["crash_count"].fillna(0)
+
+    static_cols = ["segment_id", "segment_length", "ROAD_CLASS"]
+    for c in [
+        "is_oneway",
+        "from_intersection_degree",
+        "to_intersection_degree",
+        "FROM_INTERSECTION_ID",
+        "TO_INTERSECTION_ID",
+        "avg_daily_vol",
+        "avg_speed",
+        "avg_85th_percentile_speed",
+        "speed_variance",
+        "exposure",
+        "avg_wkdy_am_peak_vol",
+        "avg_wkdy_pm_peak_vol",
+    ]:
+        if c in road_network.columns:
+            static_cols.append(c)
+    static = road_network[static_cols].drop_duplicates("segment_id")
+    static = _encode_road_class_onehot(static, road_network)
+    centroids = _compute_segment_centroids(road_network)
+
+    panel = inference_idx.merge(static, on="segment_id", how="left")
+    panel = panel.merge(centroids, on="segment_id", how="left")
+    panel["window_start"] = pd.to_datetime(panel["window_start"])
+    panel = _add_temporal_indicators(panel, window_hours)
+    panel = _add_approx_hourly_vol(panel)
+    panel = _attach_weather_features(panel, weather_data=weather_data)
+    panel = _compute_lag_features_from_sparse(
+        panel, crash_counts_sparse, window_hours
+    )
+
+    panel["future_crash_count"] = 0.0
+    logger.info(
+        "Built inference panel for datetime %s: %d segments",
+        target_window,
+        len(panel),
     )
     return panel
 
