@@ -15,28 +15,53 @@ struct RiskDetailView: View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    // Header with name and risk score
                     VStack(alignment: .leading, spacing: 8) {
                         Text(segment.linearName)
                             .font(.title)
                             .fontWeight(.bold)
                         
-                        HStack {
+                        HStack(alignment: .center, spacing: 16) {
                             Label(segment.riskLevel.displayName, systemImage: segment.riskLevel.systemImage)
                                 .foregroundColor(Color(hex: segment.riskLevel.color))
                                 .font(.headline)
                             
-                            Spacer()
-                            
-                            Text("\(Int(segment.confidence * 100))% confidence")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                            // Risk Score (0-100)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Risk Score")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text("\(segment.displayRiskScore)/100")
+                                    .font(.title2)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(Color(hex: segment.riskLevel.color))
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color(hex: segment.riskLevel.color).opacity(0.15))
+                            .cornerRadius(8)
                         }
                     }
                     .padding()
                     .background(Color(hex: segment.riskLevel.color).opacity(0.1))
                     .cornerRadius(12)
                     
-                    // road information
+                    // Explanation (when user taps into it)
+                    if let explanation = segment.riskExplanation, !explanation.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Why This Score?")
+                                .font(.headline)
+                            
+                            Text(explanation)
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+                    }
+                    
+                    // Road information
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Road Information")
                             .font(.headline)
@@ -48,27 +73,18 @@ struct RiskDetailView: View {
                     .background(Color(.systemGray6))
                     .cornerRadius(12)
                     
-                    // crash statistics
+                    // Recent activity (crashes in latest model window)
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Crash Statistics")
+                        Text("Recent Activity")
                             .font(.headline)
                         
-                        InfoRow(label: "Total Crashes", value: "\(segment.numTotalCrashes)")
-                        InfoRow(label: "KSI Crashes", value: "\(segment.numKSICrashes)")
-                        InfoRow(label: "Fatalities", value: "\(segment.fatalityCount)")
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
-                    
-                    // risk assessment
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Risk Assessment")
-                            .font(.headline)
-                        
-                        Text("This road segment has been identified as \(segment.riskLevel.displayName.lowercased()) risk based on historical crash data and road characteristics.")
-                            .font(.body)
-                            .foregroundColor(.secondary)
+                        InfoRow(label: "Crashes (latest period)", value: "\(segment.numTotalCrashes)")
+                        if segment.numKSICrashes > 0 {
+                            InfoRow(label: "KSI Crashes", value: "\(segment.numKSICrashes)")
+                        }
+                        if segment.fatalityCount > 0 {
+                            InfoRow(label: "Fatalities", value: "\(segment.fatalityCount)")
+                        }
                     }
                     .padding()
                     .background(Color(.systemGray6))

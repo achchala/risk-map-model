@@ -1,0 +1,144 @@
+//
+//  AddressAutocompleteField.swift
+//  RiskMapApp
+//
+//  Address autocomplete using MapKit's MKLocalSearchCompleter
+//
+
+import SwiftUI
+import MapKit
+
+struct AddressAutocompleteField: View {
+    let placeholder: String
+    let iconName: String
+    let iconColor: Color
+    @Binding var text: String
+    @Binding var coordinate: CLLocationCoordinate2D?
+    var onSelect: ((CLLocationCoordinate2D, String) -> Void)?
+    
+    @StateObject private var completer = LocalSearchCompleter()
+    @FocusState private var isFocused: Bool
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: iconName)
+                    .foregroundColor(iconColor)
+                    .font(.title3)
+                
+                TextField(placeholder, text: $text)
+                    .textFieldStyle(.plain)
+                    .focused($isFocused)
+                    .onChange(of: text) { _, newValue in
+                        completer.search(query: newValue)
+                        if newValue.isEmpty {
+                            coordinate = nil
+                        }
+                    }
+                    .autocorrectionDisabled()
+            }
+            .padding()
+            .background(Color(UIColor.systemBackground))
+            
+            // Suggestions dropdown
+            if isFocused && !completer.suggestions.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(completer.suggestions.enumerated()), id: \.offset) { index, suggestion in
+                        Button {
+                            selectSuggestion(suggestion)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "mappin.circle")
+                                    .foregroundColor(.secondary)
+                                    .font(.body)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(suggestion.title)
+                                        .font(.subheadline)
+                                        .foregroundColor(.primary)
+                                    if !suggestion.subtitle.isEmpty {
+                                        Text(suggestion.subtitle)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        if index < completer.suggestions.count - 1 {
+                            Divider()
+                                .padding(.leading, 40)
+                        }
+                    }
+                }
+                .background(Color(UIColor.secondarySystemBackground))
+                .cornerRadius(8)
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
+            }
+        }
+    }
+    
+    private func selectSuggestion(_ suggestion: MKLocalSearchCompletion) {
+        let request = MKLocalSearch.Request(completion: suggestion)
+        let search = MKLocalSearch(request: request)
+        
+        search.start { response, error in
+            guard let response = response, let item = response.mapItems.first else { return }
+            let coord = item.placemark.coordinate
+            let title = item.name ?? suggestion.title
+            
+            DispatchQueue.main.async {
+                text = title
+                coordinate = coord
+                onSelect?(coord, title)
+                completer.suggestions = []
+            }
+        }
+    }
+}
+
+/// Observable object that manages MKLocalSearchCompleter for SwiftUI
+final class LocalSearchCompleter: NSObject, ObservableObject {
+    @Published var suggestions: [MKLocalSearchCompletion] = []
+    
+    private let completer = MKLocalSearchCompleter()
+    
+    // Toronto region bias for better local results
+    private let torontoRegion = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 43.6532, longitude: -79.3832),
+        span: MKCoordinateSpan(latitudeDelta: 0.3, longitudeDelta: 0.3)
+    )
+    
+    override init() {
+        super.init()
+        completer.delegate = self
+        completer.region = torontoRegion
+        completer.resultTypes = [.address, .pointOfInterest]
+    }
+    
+    func search(query: String) {
+        guard query.count >= 2 else {
+            suggestions = []
+            return
+        }
+        completer.queryFragment = query
+    }
+}
+
+extension LocalSearchCompleter: MKLocalSearchCompleterDelegate {
+    func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
+        DispatchQueue.main.async {
+            self.suggestions = Array(completer.results.prefix(5))
+        }
+    }
+    
+    func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
+        DispatchQueue.main.async {
+            self.suggestions = []
+        }
+    }
+}

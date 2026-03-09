@@ -40,12 +40,18 @@ class RiskService: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.timeoutInterval = 30.0  // 30 second timeout
             
-            // send region bounds
+            // send region bounds + current time for risk adjustment
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            formatter.timeZone = TimeZone.current
+            let asOf = formatter.string(from: Date())
+
             let requestBody: [String: Any] = [
                 "north": region.center.latitude + region.span.latitudeDelta / 2,
                 "south": region.center.latitude - region.span.latitudeDelta / 2,
                 "east": region.center.longitude + region.span.longitudeDelta / 2,
-                "west": region.center.longitude - region.span.longitudeDelta / 2
+                "west": region.center.longitude - region.span.longitudeDelta / 2,
+                "as_of": asOf
             ]
             
             request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
@@ -103,9 +109,15 @@ class RiskService: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone.current
+        let asOf = formatter.string(from: Date())
+
         let requestBody: [String: Any] = [
             "latitude": location.latitude,
-            "longitude": location.longitude
+            "longitude": location.longitude,
+            "as_of": asOf
         ]
         
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)

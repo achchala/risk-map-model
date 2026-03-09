@@ -61,28 +61,25 @@ struct RiskListRow: View {
                 Text(segment.linearName)
                     .font(.headline)
                 
-                HStack {
-                    Label("\(segment.numTotalCrashes) crashes", systemImage: "car.fill")
+                if segment.numTotalCrashes > 0 {
+                    Label("\(segment.numTotalCrashes) crash(es) in recent period", systemImage: "car.fill")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
-                    if segment.numKSICrashes > 0 {
-                        Label("\(segment.numKSICrashes) KSI", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
+                } else {
+                    Text(segment.roadClass)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
             
             Spacer()
             
-            VStack(alignment: .trailing) {
-                Text(segment.riskLevel.displayName)
-                    .font(.caption)
-                    .fontWeight(.semibold)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(segment.displayRiskScore)")
+                    .font(.title2)
+                    .fontWeight(.bold)
                     .foregroundColor(Color(hex: segment.riskLevel.color))
-                
-                Text("\(Int(segment.confidence * 100))%")
+                Text("risk score")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }

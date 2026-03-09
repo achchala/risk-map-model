@@ -46,6 +46,8 @@ struct RoadSegment: Identifiable, Codable {
     let roadClass: String
     let segmentLength: Double
     let riskLevel: RiskLevel
+    let riskScore: Int?
+    let riskExplanation: String?
     let confidence: Double
     let numTotalCrashes: Int
     let numKSICrashes: Int
@@ -57,12 +59,18 @@ struct RoadSegment: Identifiable, Codable {
         let longitude: Double
     }
     
+    var displayRiskScore: Int {
+        riskScore ?? Int(confidence * 100)
+    }
+    
     enum CodingKeys: String, CodingKey {
         case id
         case linearName = "LINEAR_NAME"
         case roadClass = "ROAD_CLASS"
         case segmentLength = "segment_length"
         case riskLevel = "risk_label"
+        case riskScore = "risk_score"
+        case riskExplanation = "risk_explanation"
         case confidence
         case numTotalCrashes = "num_total_crashes"
         case numKSICrashes = "num_ksi_crashes"
@@ -74,6 +82,8 @@ struct RoadSegment: Identifiable, Codable {
 // risk prediction response
 struct RiskPredictionResponse: Codable {
     let riskLevel: RiskLevel
+    let riskScore: Int?
+    let riskExplanation: String?
     let confidence: Double
     let probabilities: RiskProbabilities
     let segmentInfo: RoadSegment?
@@ -82,6 +92,43 @@ struct RiskPredictionResponse: Codable {
         let low: Double
         let medium: Double
         let high: Double
+    }
+}
+
+// MARK: - Weather Data (for real-time risk adjustment)
+struct WeatherData: Codable {
+    let condition: WeatherCondition
+    let temperature: Double
+    let visibility: Double? // in km
+    let windSpeed: Double? // in km/h
+    let precipitation: Double? // in mm
+
+    enum WeatherCondition: String, Codable {
+        case clear = "clear"
+        case cloudy = "cloudy"
+        case rain = "rain"
+        case heavyRain = "heavy_rain"
+        case snow = "snow"
+        case heavySnow = "heavy_snow"
+        case fog = "fog"
+        case mist = "mist"
+        case thunderstorm = "thunderstorm"
+        case sleet = "sleet"
+
+        var displayName: String {
+            switch self {
+            case .clear: return "Clear"
+            case .cloudy: return "Cloudy"
+            case .mist: return "Mist"
+            case .rain: return "Rain"
+            case .heavyRain: return "Heavy Rain"
+            case .snow: return "Snow"
+            case .heavySnow: return "Heavy Snow"
+            case .fog: return "Fog"
+            case .thunderstorm: return "Thunderstorm"
+            case .sleet: return "Sleet"
+            }
+        }
     }
 }
 
