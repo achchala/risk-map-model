@@ -443,6 +443,86 @@ def _get_risk_driver_features_for_segment(
     return drivers
 
 
+def _calculate_weather_risk_multiplier(weather_data: Optional[dict]) -> float:
+    """
+    Research-backed risk multiplier from peer-reviewed studies.
+    Sources: ETRR 2022, Nature Scientific Reports 2025, Accident Analysis & Prevention.
+    See WEATHER_MULTIPLIERS_CITATIONS.md for references.
+    """
+    if not weather_data:
+        return 1.0
+    condition = (weather_data.get("condition") or "clear").lower()
+    visibility = weather_data.get("visibility")
+    precipitation = weather_data.get("precipitation") or 0
+
+    multipliers = {
+        "clear": 1.0,
+        "cloudy": 1.02,
+        "mist": 1.15,
+        "rain": 1.35,
+        "heavy_rain": 1.45,
+        "snow": 1.6,
+        "heavy_snow": 2.0,
+        "fog": 2.5,
+        "thunderstorm": 1.6,
+        "sleet": 1.9,
+    }
+    mult = multipliers.get(condition, 1.0)
+    if visibility is not None:
+        if visibility < 1.0:
+            mult *= 1.3
+        elif visibility < 3.0:
+            mult *= 1.2
+        elif visibility < 5.0:
+            mult *= 1.1
+    if precipitation and float(precipitation) > 5.0:
+        mult *= 1.1
+    return mult
+
+
+def _calculate_time_risk_multiplier(time_data: Optional[dict]) -> float:
+    """Time-of-day risk multiplier (rush hour, night)."""
+    if not time_data:
+        return 1.0
+    hour = time_data.get("hour")
+    is_weekend = time_data.get("is_weekend", False)
+    if hour is None:
+        return 1.0
+    h = int(hour)
+    if h >= 23 or h < 5:
+        return 1.4
+    if h >= 22 or h < 6:
+        return 1.25
+    if (7 <= h <= 9) or (17 <= h <= 19):
+        return 1.3 if not is_weekend else 1.1
+    if 9 <= h < 17:
+        return 1.0
+    return 1.1
+
+
+def _adjust_risk_for_conditions(
+    risk_label: str, risk_score: int, weather_mult: float, time_mult: float
+) -> tuple[str, int]:
+    """
+    Adjust risk_label and risk_score based on weather and time multipliers.
+    Returns (adjusted_risk_label, adjusted_risk_score).
+    """
+    risk_values = {"low": 1, "medium": 2, "high": 3}
+    base = risk_values.get(risk_label, 1)
+    combined = weather_mult * time_mult
+    adj_value = base * combined
+
+    if adj_value >= 2.5:
+        new_label = "high"
+    elif adj_value >= 1.5:
+        new_label = "medium"
+    else:
+        new_label = "low"
+
+    adj_score = min(100, int(risk_score * combined))
+    return new_label, adj_score
+
+
 def _build_risk_explanation(drivers: dict, risk_label: str, risk_score: int) -> str:
     """Build human-readable explanation from risk drivers and score."""
     parts = []
@@ -557,6 +637,11 @@ def get_risk_predictions():
         east = data.get("east")
         west = data.get("west")
         as_of = data.get("as_of")
+        weather_data = data.get("weather")
+        time_data = data.get("time_of_day")
+
+        weather_mult = _calculate_weather_risk_multiplier(weather_data)
+        time_mult = _calculate_time_risk_multiplier(time_data)
 
         lam_result = _get_or_compute_lambda_map(as_of)
         if lam_result is None:
@@ -598,6 +683,9 @@ def get_risk_predictions():
             lam = lam_map.get(nid, 0.0) if nid is not None else 0.0
             confidence = _lambda_to_display_confidence(lam, lam_values_sorted=lam_sorted)
             risk_score = int(round(confidence * 100))
+            risk_label, risk_score = _adjust_risk_for_conditions(
+                risk_label, risk_score, weather_mult, time_mult
+            )
             recent_crashes = (
                 int(crash_map.get(nid, 0)) if crash_map and nid is not None else 0
             )
@@ -698,6 +786,11 @@ def get_risk_prediction():
         lat = data.get("latitude")
         lon = data.get("longitude")
         as_of = data.get("as_of")
+        weather_data = data.get("weather")
+        time_data = data.get("time_of_day")
+
+        weather_mult = _calculate_weather_risk_multiplier(weather_data)
+        time_mult = _calculate_time_risk_multiplier(time_data)
 
         lam_result = _get_or_compute_lambda_map(as_of)
         if lam_result is None:
@@ -732,6 +825,9 @@ def get_risk_prediction():
             risk_label = _lambda_to_risk_label(lam, p70=p70, p90=p90)
             confidence = _lambda_to_display_confidence(lam, lam_values_sorted=lam_sorted)
             risk_score = int(round(confidence * 100))
+            risk_label, risk_score = _adjust_risk_for_conditions(
+                risk_label, risk_score, weather_mult, time_mult
+            )
             recent_crashes = (
                 int(crash_map.get(nid, 0)) if crash_map and nid is not None else 0
             )

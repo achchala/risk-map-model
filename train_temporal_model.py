@@ -34,6 +34,8 @@ from src.data_processing.spatial_join_fast import (  # type: ignore
 )
 from src.feature_engineering.panel_builder import (  # type: ignore
     PanelConfig,
+    build_crash_counts_sparse,
+    build_inference_panel_for_datetime,
     build_latest_window_inference_panel,
     build_weekly_sampled_future_panel,
     temporal_train_val_test_split,
@@ -184,13 +186,20 @@ def main() -> None:
     )
     logger.info("Hourly training panel shape: %s", training_panel.shape)
 
-    # 4b) Build inference panel: one row per segment for the latest window only.
-    # Full segments×hours grid is intractable for hourly; API uses latest-window snapshot.
+    # 4b) Build crash counts sparse and inference panel for latest window.
+    crash_counts_sparse = build_crash_counts_sparse(
+        event_level, panel_config.window_size_hours
+    )
+    crash_counts_path = reports_dir / "crash_counts_sparse.parquet"
+    crash_counts_sparse.to_parquet(crash_counts_path, index=False)
+    logger.info("Saved crash counts sparse to %s (%d rows)", crash_counts_path, len(crash_counts_sparse))
+
     full_panel = build_latest_window_inference_panel(
         event_level_crashes=event_level,
         road_network=road_with_ids,
         weather_data=weather_data,
         config=panel_config,
+        crash_counts_sparse=crash_counts_sparse,
     )
     logger.info("Latest-window inference panel shape: %s", full_panel.shape)
 

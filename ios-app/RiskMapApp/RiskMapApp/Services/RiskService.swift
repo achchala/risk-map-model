@@ -20,38 +20,49 @@ class RiskService: ObservableObject {
     // For Simulator: "http://localhost:8000/api"
     // For Device: "http://10.10.11.47:8000/api" (update IP if needed)
     
-    // fetch risk predictions for region
-    func fetchRiskPredictions(for region: MKCoordinateRegion) async throws -> [RoadSegment] {
+    // fetch risk predictions for region (pass weather for real-time risk adjustment)
+    func fetchRiskPredictions(for region: MKCoordinateRegion, weather: WeatherData? = nil) async throws -> [RoadSegment] {
         await MainActor.run {
             self.isLoading = true
         }
-        
+
         do {
             let urlString = "\(baseURL)/risk-predictions"
             guard let url = URL(string: urlString) else {
-                await MainActor.run {
-                    self.isLoading = false
-                }
+                await MainActor.run { self.isLoading = false }
                 throw APIError.invalidURL
             }
-            
+
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 30.0  // 30 second timeout
-            
-            // send region bounds + current time for risk adjustment
+            request.timeoutInterval = 30.0
+
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime]
             formatter.timeZone = TimeZone.current
             let asOf = formatter.string(from: Date())
 
-            let requestBody: [String: Any] = [
+            var requestBody: [String: Any] = [
                 "north": region.center.latitude + region.span.latitudeDelta / 2,
                 "south": region.center.latitude - region.span.latitudeDelta / 2,
                 "east": region.center.longitude + region.span.longitudeDelta / 2,
                 "west": region.center.longitude - region.span.longitudeDelta / 2,
                 "as_of": asOf
+            ]
+
+            if let weather = weather {
+                var weatherDict: [String: Any] = ["condition": weather.condition.rawValue]
+                if let v = weather.visibility { weatherDict["visibility"] = v }
+                if let p = weather.precipitation { weatherDict["precipitation"] = p }
+                requestBody["weather"] = weatherDict
+            }
+
+            let cal = Calendar.current
+            let now = Date()
+            requestBody["time_of_day"] = [
+                "hour": cal.component(.hour, from: now),
+                "is_weekend": [1, 7].contains(cal.component(.weekday, from: now))
             ]
             
             request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
@@ -98,27 +109,32 @@ class RiskService: ObservableObject {
         }
     }
     
-    // MARK: - get risk prediction for location
-    func getRiskPrediction(for location: CLLocationCoordinate2D) async throws -> RiskPredictionResponse {
+    // MARK: - get risk prediction for location (pass weather for real-time adjustment)
+    func getRiskPrediction(for location: CLLocationCoordinate2D, weather: WeatherData? = nil) async throws -> RiskPredictionResponse {
         let urlString = "\(baseURL)/risk-prediction"
         guard let url = URL(string: urlString) else {
             throw APIError.invalidURL
         }
-        
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
+
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = TimeZone.current
-        let asOf = formatter.string(from: Date())
 
-        let requestBody: [String: Any] = [
+        var requestBody: [String: Any] = [
             "latitude": location.latitude,
             "longitude": location.longitude,
-            "as_of": asOf
+            "as_of": formatter.string(from: Date())
         ]
+        if let weather = weather {
+            var w: [String: Any] = ["condition": weather.condition.rawValue]
+            if let v = weather.visibility { w["visibility"] = v }
+            if let p = weather.precipitation { w["precipitation"] = p }
+            requestBody["weather"] = w
+        }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
         

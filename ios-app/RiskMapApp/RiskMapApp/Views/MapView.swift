@@ -10,6 +10,7 @@ import MapKit
 
 struct MapView: View {
     @EnvironmentObject var riskService: RiskService
+    @EnvironmentObject var weatherService: WeatherService
     @State private var cameraPosition = MapCameraPosition.region(
         MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: 43.6532, longitude: -79.3832), // Toronto
@@ -89,7 +90,8 @@ struct MapView: View {
     private func loadRiskDataForRegion(_ region: MKCoordinateRegion) {
         Task {
             do {
-                _ = try await riskService.fetchRiskPredictions(for: region)
+                let weather = await weatherService.getWeatherData(for: region.center)
+                _ = try await riskService.fetchRiskPredictions(for: region, weather: weather)
             } catch {
                 let errorMessage = error.localizedDescription
                 print("Error loading risk data: \(errorMessage)")
