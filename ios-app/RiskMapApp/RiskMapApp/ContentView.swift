@@ -23,7 +23,7 @@ struct ContentView: View {
                     Label("High Risk", systemImage: "exclamationmark.triangle")
                 }
             
-            RouteNavigationView()
+            RouteNavigationViewWrapper()
                 .tabItem {
                     Label("Navigation", systemImage: "location.north.circle")
                 }
