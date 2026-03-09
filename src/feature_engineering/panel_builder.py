@@ -71,15 +71,49 @@ def _compute_segment_centroids(road_network: gpd.GeoDataFrame) -> pd.DataFrame:
     )
 
 
-def _add_temporal_indicators(panel: pd.DataFrame) -> pd.DataFrame:
-    """Add temporal indicator features derived from window_start."""
+def _add_temporal_indicators(
+    panel: pd.DataFrame, window_size_hours: Optional[int] = None
+) -> pd.DataFrame:
+    """
+    Add temporal indicator features derived from window_start.
+
+    For weekly (or coarser) windows, skips hour_of_day, day_of_week, is_weekend
+    (they carry no real signal — each window spans 7 days). Keeps month and
+    season which vary meaningfully.
+    """
     panel = panel.copy()
-    panel["hour_of_day"] = panel["window_start"].dt.hour
-    panel["day_of_week"] = panel["window_start"].dt.dayofweek
-    panel["is_weekend"] = panel["day_of_week"].isin([5, 6])
     panel["month"] = panel["window_start"].dt.month
     panel["season"] = panel["month"].map(SEASON_MAPPING)
+    if window_size_hours is None or not _is_weekly_or_coarser(window_size_hours):
+        panel["hour_of_day"] = panel["window_start"].dt.hour
+        panel["day_of_week"] = panel["window_start"].dt.dayofweek
+        panel["is_weekend"] = panel["day_of_week"].isin([5, 6])
     return panel
+
+
+def _encode_road_class_onehot(
+    static: pd.DataFrame, road_network: gpd.GeoDataFrame
+) -> pd.DataFrame:
+    """
+    Add one-hot encoded ROAD_CLASS columns for modeling.
+
+    Keeps ROAD_CLASS for display; adds road_class_<value> columns (0/1) for each
+    unique value in the road network. Uses full road_network to ensure all
+    possible categories get columns, so inference sees the same schema.
+    """
+    static = static.copy()
+    road_class_vals = (
+        road_network["ROAD_CLASS"].fillna("unknown").astype(str).unique().tolist()
+    )
+
+    for val in road_class_vals:
+        safe_name = str(val).replace(" ", "_").replace("None", "unknown")
+        col_name = f"road_class_{safe_name}"
+        static[col_name] = (
+            static["ROAD_CLASS"].fillna("unknown").astype(str) == val
+        ).astype(int)
+
+    return static
 
 
 def _attach_weather_features(
@@ -102,29 +136,33 @@ def _attach_weather_features(
 
     if weather_data is None or weather_data.empty:
         logger.warning(
-            "Weather data is missing or empty; proceeding with is_missing_weather flag only."
+            "Weather data is missing or empty; skipping weather features."
         )
+        return panel
+
+    if "datetime_hour" not in weather_data.columns:
+        logger.warning("Weather data missing datetime_hour; skipping weather join.")
         panel["is_missing_weather"] = True
         return panel
 
-    # Expect weather_data to already contain datetime_hour, lat_grid, lon_grid
-    required_cols = {"datetime_hour", "lat_grid", "lon_grid"}
-    if not required_cols.issubset(weather_data.columns):
-        logger.warning(
-            "Weather data is missing required join keys %s; skipping weather join.",
-            required_cols,
+    # City-wide weather (no lat/lon): join only on datetime_hour
+    # Gridded weather: join on datetime_hour, lat_grid, lon_grid
+    has_grid = "lat_grid" in weather_data.columns and "lon_grid" in weather_data.columns
+    if has_grid:
+        panel["lat_grid"] = (panel["segment_centroid_lat"] // grid_size) * grid_size
+        panel["lon_grid"] = (panel["segment_centroid_lon"] // grid_size) * grid_size
+        merge_on = ["datetime_hour", "lat_grid", "lon_grid"]
+        wx_subset = weather_data
+    else:
+        merge_on = ["datetime_hour"]
+        wx_subset = weather_data.drop(
+            columns=[c for c in weather_data.columns if c in {"lat_grid", "lon_grid"}],
+            errors="ignore",
         )
-        panel["is_missing_weather"] = True
-        return panel
 
-    # Compute grid coordinates for segments (~1km grid by default)
-    panel["lat_grid"] = (panel["segment_centroid_lat"] // grid_size) * grid_size
-    panel["lon_grid"] = (panel["segment_centroid_lon"] // grid_size) * grid_size
-
-    # Merge weather onto panel
     merged = panel.merge(
-        weather_data,
-        on=["datetime_hour", "lat_grid", "lon_grid"],
+        wx_subset,
+        on=merge_on,
         how="left",
         suffixes=("", "_wx"),
     )
@@ -139,6 +177,7 @@ def _attach_weather_features(
             "visibility",
             "wind_speed",
             "weather_condition",
+            "snow_mm",
         }
     ]
 
@@ -154,6 +193,11 @@ def _attach_weather_features(
     return merged
 
 
+def _is_weekly_or_coarser(window_size_hours: int) -> bool:
+    """True when window is weekly (168h) or coarser."""
+    return window_size_hours >= 24 * 6
+
+
 def _compute_lag_features_from_sparse(
     panel: pd.DataFrame,
     crash_counts_sparse: pd.DataFrame,
@@ -163,12 +207,11 @@ def _compute_lag_features_from_sparse(
     Add past-only lag and rolling features by joining against a sparse
     crash-count lookup table keyed by (segment_id, window_start).
 
-    Works correctly for both sampled (sparse) and dense panels, unlike a
-    shift-based approach which requires every segment×window to exist.
+    For weekly (or coarser) windows: uses properly spaced lags to avoid
+    redundancy — crashes_1_week_ago, crashes_2_weeks_ago, crashes_4_weeks_ago,
+    rolling_mean_4_weeks, rolling_max_4_weeks.
 
-    Column names match the dense-panel builder for compatibility:
-        past_crash_count_1h, past_crash_count_24h, past_crash_count_7d,
-        rolling_mean_7d, rolling_max_30d
+    For finer windows: uses hour-based lags (past_crash_count_1h, 24h, 7d, etc).
     """
     panel = panel.copy()
     delta = pd.Timedelta(hours=window_size_hours)
@@ -177,47 +220,92 @@ def _compute_lag_features_from_sparse(
         subset=["segment_id", "window_start"]
     )
 
-    steps_24h = max(1, int(round(24 / window_size_hours)))
-    steps_7d = max(1, int(round(24 * 7 / window_size_hours)))
-    window_30d = max(1, int(round(24 * 30 / window_size_hours)))
-
-    # Build shifted lookup for each lag step.  Shifting the sparse table
-    # *forward* by k steps means: "crash_count from k windows ago."
-    lag_frames = {}
-    for k in range(1, window_30d + 1):
-        shifted = sparse.copy()
-        shifted["window_start"] = shifted["window_start"] + k * delta
-        lag_frames[k] = shifted.rename(columns={"crash_count": f"_lag_{k}"})
-
-    lag_table = lag_frames[1][["segment_id", "window_start", "_lag_1"]]
-    for k in range(2, window_30d + 1):
-        lag_table = lag_table.merge(
-            lag_frames[k][["segment_id", "window_start", f"_lag_{k}"]],
-            on=["segment_id", "window_start"],
-            how="outer",
+    if _is_weekly_or_coarser(window_size_hours):
+        # Weekly-spaced lags: 1, 2, 4 windows back (distinct signal)
+        lag_steps = [1, 2, 4]
+        rolling_window = 4
+        lag_col_names = [
+            "crashes_1_week_ago",
+            "crashes_2_weeks_ago",
+            "crashes_4_weeks_ago",
+        ]
+        rolling_mean_name = "rolling_mean_4_weeks"
+        rolling_max_name = "rolling_max_4_weeks"
+    else:
+        # Finer windows: hour-based. Use 24h rolling (not 30d) to avoid OOM.
+        steps_24h = max(1, int(round(24 / window_size_hours)))
+        steps_7d = max(1, int(round(24 * 7 / window_size_hours)))
+        lag_steps = [1, steps_24h, steps_7d]
+        rolling_window = min(24, steps_7d)  # Cap at 24 for memory
+        lag_col_names = [
+            "past_crash_count_1h",
+            "past_crash_count_24h",
+            "past_crash_count_7d",
+        ]
+        rolling_mean_name = "rolling_mean_24h"
+        rolling_max_name = "rolling_max_24h"
+        # Only compute lags we need (1..rolling_window + steps_7d), not 1..720.
+        lag_steps_to_compute = sorted(
+            set(range(1, rolling_window + 1)) | set(lag_steps)
         )
 
-    lag_cols = [f"_lag_{k}" for k in range(1, window_30d + 1)]
-    lag_table[lag_cols] = lag_table[lag_cols].fillna(0)
+    max_lag = max(lag_steps + [rolling_window]) if _is_weekly_or_coarser(window_size_hours) else max(lag_steps_to_compute)
 
-    lag_table["past_crash_count_1h"] = lag_table["_lag_1"]
-    lag_table["past_crash_count_24h"] = lag_table[f"_lag_{steps_24h}"]
-    lag_table["past_crash_count_7d"] = lag_table[f"_lag_{steps_7d}"]
+    # Memory-efficient path for fine windows: merge panel with each shifted sparse
+    # one at a time instead of building a huge lag_table (avoids OOM).
+    if _is_weekly_or_coarser(window_size_hours):
+        lag_frames = {}
+        for k in range(1, max_lag + 1):
+            shifted = sparse.copy()
+            shifted["window_start"] = shifted["window_start"] + k * delta
+            lag_frames[k] = shifted.rename(columns={"crash_count": f"_lag_{k}"})
+        lag_table = lag_frames[1][["segment_id", "window_start", "_lag_1"]]
+        for k in range(2, max_lag + 1):
+            lag_table = lag_table.merge(
+                lag_frames[k][["segment_id", "window_start", f"_lag_{k}"]],
+                on=["segment_id", "window_start"],
+                how="outer",
+            )
+        lag_table[[f"_lag_{k}" for k in range(1, max_lag + 1)]] = lag_table[
+            [f"_lag_{k}" for k in range(1, max_lag + 1)]
+        ].fillna(0)
+        for step, col_name in zip(lag_steps, lag_col_names):
+            lag_table[col_name] = lag_table[f"_lag_{step}"]
+        cols_rolling = [f"_lag_{k}" for k in range(1, rolling_window + 1)]
+        lag_table[rolling_mean_name] = lag_table[cols_rolling].mean(axis=1)
+        lag_table[rolling_max_name] = lag_table[cols_rolling].max(axis=1)
+        feature_names = (
+            ["segment_id", "window_start"]
+            + lag_col_names
+            + [rolling_mean_name, rolling_max_name]
+        )
+        lag_table = lag_table[feature_names]
+        panel = panel.merge(lag_table, on=["segment_id", "window_start"], how="left")
+    else:
+        # Merge one lag at a time (only the steps we need) to avoid OOM.
+        for k in lag_steps_to_compute:
+            shifted = sparse[["segment_id", "window_start", "crash_count"]].copy()
+            shifted["window_start"] = shifted["window_start"] + k * delta
+            shifted = shifted.rename(columns={"crash_count": f"_lag_{k}"})
+            panel = panel.merge(
+                shifted, on=["segment_id", "window_start"], how="left"
+            )
+            panel[f"_lag_{k}"] = panel[f"_lag_{k}"].fillna(0)
+        for step, col_name in zip(lag_steps, lag_col_names):
+            panel[col_name] = panel[f"_lag_{step}"]
+        cols_rolling = [f"_lag_{k}" for k in range(1, rolling_window + 1) if f"_lag_{k}" in panel.columns]
+        if cols_rolling:
+            panel[rolling_mean_name] = panel[cols_rolling].mean(axis=1)
+            panel[rolling_max_name] = panel[cols_rolling].max(axis=1)
+        else:
+            panel[rolling_mean_name] = 0.0
+            panel[rolling_max_name] = 0.0
+        for k in lag_steps_to_compute:
+            panel.drop(columns=[f"_lag_{k}"], inplace=True)
 
-    cols_7d = [f"_lag_{k}" for k in range(1, steps_7d + 1)]
-    lag_table["rolling_mean_7d"] = lag_table[cols_7d].mean(axis=1)
-    lag_table["rolling_max_30d"] = lag_table[lag_cols].max(axis=1)
-
-    feature_names = [
-        "segment_id", "window_start",
-        "past_crash_count_1h", "past_crash_count_24h", "past_crash_count_7d",
-        "rolling_mean_7d", "rolling_max_30d",
-    ]
-    lag_table = lag_table[feature_names]
-
-    panel = panel.merge(lag_table, on=["segment_id", "window_start"], how="left")
-    for c in feature_names[2:]:
-        panel[c] = panel[c].fillna(0)
+    for c in lag_col_names + [rolling_mean_name, rolling_max_name]:
+        if c in panel.columns:
+            panel[c] = panel[c].fillna(0)
 
     return panel
 
@@ -316,12 +404,16 @@ def build_panel_dataset(
             panel[col] = 0
 
     # 4. Attach static road features and centroids
-    static_cols = ["segment_id", "segment_length", "ROAD_CLASS"]
+    static_cols = ["segment_id", "segment_length", "ROAD_CLASS", "is_oneway", "from_intersection_degree", "to_intersection_degree"]
     for opt_col in ["FROM_INTERSECTION_ID", "TO_INTERSECTION_ID"]:
         if opt_col in road_network.columns:
             static_cols.append(opt_col)
+    for adt_col in ["avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+        if adt_col in road_network.columns:
+            static_cols.append(adt_col)
 
     static = road_network[static_cols].drop_duplicates("segment_id")
+    static = _encode_road_class_onehot(static, road_network)
     centroids = _compute_segment_centroids(road_network)
 
     panel = panel.merge(static, on="segment_id", how="left")
@@ -329,49 +421,52 @@ def build_panel_dataset(
 
     # 5. Temporal indicators
     panel["window_start"] = pd.to_datetime(panel["window_start"])
-    panel = _add_temporal_indicators(panel)
+    panel = _add_temporal_indicators(panel, config.window_size_hours)
 
     # 6. Optional weather features
     panel = _attach_weather_features(panel, weather_data=weather_data)
 
     # 7. Past-only lag and rolling features (CRITICAL: shift first)
     panel = panel.sort_values(["segment_id", "window_start"])
-
-    # Basic lags of raw counts. For coarse windows (e.g. weekly/monthly), fall
-    # back to at least one-window lags so that integer division never yields 0.
-    panel["past_crash_count_1h"] = panel.groupby("segment_id")["crash_count"].shift(1)
-    steps_24h = max(1, int(round(24 / config.window_size_hours)))
-    steps_7d = max(1, int(round((24 * 7) / config.window_size_hours)))
-    panel["past_crash_count_24h"] = panel.groupby("segment_id")["crash_count"].shift(
-        steps_24h
-    )
-    panel["past_crash_count_7d"] = panel.groupby("segment_id")["crash_count"].shift(
-        steps_7d
-    )
-
-    # Rolling windows computed on a *shifted* series so they never peek
     past_series = panel.groupby("segment_id")["crash_count"].shift(1)
 
-    # 7-day rolling mean and ~30-day rolling max. Ensure window sizes are at
-    # least 1 even for coarse bins (e.g. weekly/monthly).
-    window_7d = max(1, int(round((24 * 7) / config.window_size_hours)))
-    window_30d = max(1, int(round((24 * 30) / config.window_size_hours)))
+    if _is_weekly_or_coarser(config.window_size_hours):
+        # Weekly-spaced lags: 1, 2, 4 windows back (distinct signal)
+        panel["crashes_1_week_ago"] = panel.groupby("segment_id")["crash_count"].shift(1)
+        panel["crashes_2_weeks_ago"] = panel.groupby("segment_id")["crash_count"].shift(2)
+        panel["crashes_4_weeks_ago"] = panel.groupby("segment_id")["crash_count"].shift(4)
+        rolling_window = 4
+        rolling_mean_name = "rolling_mean_4_weeks"
+        rolling_max_name = "rolling_max_4_weeks"
+    else:
+        steps_24h = max(1, int(round(24 / config.window_size_hours)))
+        steps_7d = max(1, int(round((24 * 7) / config.window_size_hours)))
+        window_30d = max(1, int(round((24 * 30) / config.window_size_hours)))
+        panel["past_crash_count_1h"] = panel.groupby("segment_id")["crash_count"].shift(1)
+        panel["past_crash_count_24h"] = panel.groupby("segment_id")["crash_count"].shift(
+            steps_24h
+        )
+        panel["past_crash_count_7d"] = panel.groupby("segment_id")["crash_count"].shift(
+            steps_7d
+        )
+        rolling_window = max(steps_7d, window_30d)
+        rolling_mean_name = "rolling_mean_7d"
+        rolling_max_name = "rolling_max_30d"
 
-    rolling_mean_7d = (
+    rolling_mean = (
         past_series.groupby(panel["segment_id"])
-        .rolling(window_7d, min_periods=1)
+        .rolling(rolling_window, min_periods=1)
         .mean()
         .reset_index(level=0, drop=True)
     )
-    rolling_max_30d = (
+    rolling_max = (
         past_series.groupby(panel["segment_id"])
-        .rolling(window_30d, min_periods=1)
+        .rolling(rolling_window, min_periods=1)
         .max()
         .reset_index(level=0, drop=True)
     )
-
-    panel["rolling_mean_7d"] = rolling_mean_7d
-    panel["rolling_max_30d"] = rolling_max_30d
+    panel[rolling_mean_name] = rolling_mean
+    panel[rolling_max_name] = rolling_max
 
     # 8. Future labels using correct steps_ahead (H/W)
     k = config.steps_ahead()
@@ -526,19 +621,23 @@ def build_weekly_sampled_future_panel(
     )
 
     # Step 3: Attach static and temporal features at time t
-    static_cols = ["segment_id", "segment_length", "ROAD_CLASS"]
+    static_cols = ["segment_id", "segment_length", "ROAD_CLASS", "is_oneway", "from_intersection_degree", "to_intersection_degree"]
     for opt_col in ["FROM_INTERSECTION_ID", "TO_INTERSECTION_ID"]:
         if opt_col in road_network.columns:
             static_cols.append(opt_col)
+    for adt_col in ["avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+        if adt_col in road_network.columns:
+            static_cols.append(adt_col)
 
     static = road_network[static_cols].drop_duplicates("segment_id")
+    static = _encode_road_class_onehot(static, road_network)
     centroids = _compute_segment_centroids(road_network)
 
     panel = train_idx.merge(static, on="segment_id", how="left")
     panel = panel.merge(centroids, on="segment_id", how="left")
 
     panel["window_start"] = pd.to_datetime(panel["window_start"])
-    panel = _add_temporal_indicators(panel)
+    panel = _add_temporal_indicators(panel, window_size_hours)
     panel = _attach_weather_features(panel, weather_data=weather_data)
 
     # Step 3b: Lag and rolling features from sparse crash history
@@ -582,6 +681,119 @@ def build_weekly_sampled_future_panel(
             w0,
         )
 
+    return panel
+
+
+def build_sampled_future_panel(
+    event_level_crashes: gpd.GeoDataFrame,
+    road_network: gpd.GeoDataFrame,
+    weather_data: Optional[pd.DataFrame] = None,
+    window_size_hours: int = 24 * 7,
+    horizon_hours: int = 24 * 7,
+    negative_multiplier: int = 10,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Build a sampled training panel with future-looking labels for any window size.
+    Use window_size_hours=1, horizon_hours=1 for hourly; 168, 168 for weekly.
+
+    Mirrors build_weekly_sampled_future_panel logic; kept as alias for clarity.
+    """
+    return build_weekly_sampled_future_panel(
+        event_level_crashes=event_level_crashes,
+        road_network=road_network,
+        weather_data=weather_data,
+        window_size_hours=window_size_hours,
+        horizon_hours=horizon_hours,
+        negative_multiplier=negative_multiplier,
+        random_state=random_state,
+    )
+
+
+def build_latest_window_inference_panel(
+    event_level_crashes: gpd.GeoDataFrame,
+    road_network: gpd.GeoDataFrame,
+    weather_data: Optional[pd.DataFrame] = None,
+    window_size_hours: int = 1,
+    config: Optional[PanelConfig] = None,
+) -> pd.DataFrame:
+    """
+    Build an inference panel for only the latest window: one row per segment.
+    Avoids the full segments×windows grid, which is intractable for hourly data.
+
+    Returns a DataFrame with the same schema as build_panel_dataset, suitable
+    for API inference. All road_network segments get a row (cold-start uses
+    lag=0). Uses the most recent window_start from crash data.
+    """
+    if event_level_crashes.empty:
+        raise ValueError("event_level_crashes is empty; cannot build inference panel.")
+
+    required_cols = {"segment_id", "event_datetime"}
+    if not required_cols.issubset(event_level_crashes.columns):
+        missing = required_cols - set(event_level_crashes.columns)
+        raise ValueError(f"event_level_crashes missing required columns: {missing}")
+
+    if config is None:
+        config = PanelConfig(window_size_hours=window_size_hours, horizon_hours=window_size_hours)
+
+    min_event_ts = event_level_crashes["event_datetime"].min().floor("H")
+
+    crash_counts = (
+        event_level_crashes.groupby(
+            [
+                "segment_id",
+                pd.Grouper(
+                    key="event_datetime",
+                    freq=f"{config.window_size_hours}H",
+                    label="left",
+                    origin=min_event_ts,
+                ),
+            ]
+        )
+        .size()
+        .reset_index(name="crash_count")
+        .rename(columns={"event_datetime": "window_start"})
+    )
+    crash_counts["window_start"] = pd.to_datetime(crash_counts["window_start"])
+
+    latest_window = crash_counts["window_start"].max()
+    all_segments = road_network["segment_id"].unique()
+
+    inference_idx = pd.DataFrame(
+        {"segment_id": all_segments, "window_start": latest_window}
+    )
+    inference_idx = inference_idx.merge(
+        crash_counts[["segment_id", "window_start", "crash_count"]],
+        on=["segment_id", "window_start"],
+        how="left",
+    )
+    inference_idx["crash_count"] = inference_idx["crash_count"].fillna(0)
+
+    static_cols = ["segment_id", "segment_length", "ROAD_CLASS"]
+    for c in ["is_oneway", "from_intersection_degree", "to_intersection_degree",
+              "FROM_INTERSECTION_ID", "TO_INTERSECTION_ID",
+              "avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+        if c in road_network.columns:
+            static_cols.append(c)
+    static = road_network[static_cols].drop_duplicates("segment_id")
+    static = _encode_road_class_onehot(static, road_network)
+    centroids = _compute_segment_centroids(road_network)
+
+    panel = inference_idx.merge(static, on="segment_id", how="left")
+    panel = panel.merge(centroids, on="segment_id", how="left")
+    panel["window_start"] = pd.to_datetime(panel["window_start"])
+    panel = _add_temporal_indicators(panel, config.window_size_hours)
+    panel = _attach_weather_features(panel, weather_data=weather_data)
+    panel = _compute_lag_features_from_sparse(
+        panel, crash_counts, config.window_size_hours
+    )
+
+    panel["future_crash_count"] = 0.0
+    logger.info(
+        "Built latest-window inference panel: %d segments, window %s",
+        len(panel),
+        latest_window,
+    )
     return panel
 
 

@@ -22,14 +22,19 @@ from config import (
     OUTPUTS_DIR,
 )
 
-from src.data_processing.data_loader import load_and_clean_data  # type: ignore
+from src.data_processing.data_loader import (  # type: ignore
+    load_and_clean_data,
+    load_historical_weather,
+    load_model_dataset,
+    merge_model_dataset_into_road_network,
+)
 from src.data_processing.spatial_join_fast import (  # type: ignore
     perform_spatial_join_event_level,
     _ensure_stable_segment_id,
 )
 from src.feature_engineering.panel_builder import (  # type: ignore
     PanelConfig,
-    build_panel_dataset,
+    build_latest_window_inference_panel,
     build_weekly_sampled_future_panel,
     temporal_train_val_test_split,
 )
@@ -152,39 +157,42 @@ def main() -> None:
     )
     logger.info("Event-level dataset has %d rows.", len(event_level))
 
-    # 3) Ensure stable segment_id on road network
+    # 3) Ensure stable segment_id and merge ADT/speed if available
     road_with_ids = _ensure_stable_segment_id(road_network)
+    model_dataset = load_model_dataset(DATA_DIR)
+    road_with_ids = merge_model_dataset_into_road_network(road_with_ids, model_dataset)
 
-    # 4) Build temporal configuration for a *predictive* weekly horizon.
-    # We keep W = 1 week, H = 1 week to model "next-week" crash counts while
-    # avoiding the full segments×days cartesian product.
-    panel_config = PanelConfig(window_size_hours=24 * 7, horizon_hours=24 * 7)
+    # 3b) Load historical weather (city-wide Toronto) if available
+    weather_data = load_historical_weather(DATA_DIR)
+
+    # 4) Build temporal configuration for *hourly* predictive horizon.
+    # W = 1 hour, H = 1 hour: model predicts next-hour crash count.
+    panel_config = PanelConfig(window_size_hours=1, horizon_hours=1)
     logger.info(
         "Building panel dataset with window_size=%dh, horizon=%dh (steps_ahead=%d)...",
         panel_config.window_size_hours,
         panel_config.horizon_hours,
         panel_config.steps_ahead(),
     )
-    # 4a) Build a *sampled* weekly training panel with future-looking labels.
+    # 4a) Build a *sampled* hourly training panel (positives + negatives).
     training_panel = build_weekly_sampled_future_panel(
         event_level_crashes=event_level,
         road_network=road_with_ids,
-        weather_data=None,  # weather integration can be added later
+        weather_data=weather_data,
         window_size_hours=panel_config.window_size_hours,
         horizon_hours=panel_config.horizon_hours,
     )
-    logger.info("Weekly training panel shape: %s", training_panel.shape)
+    logger.info("Hourly training panel shape: %s", training_panel.shape)
 
-    # 4b) Build a full panel snapshot for backend inference using the same
-    # weekly configuration. This may be large but is written once and used
-    # only for the latest window in the API.
-    full_panel = build_panel_dataset(
+    # 4b) Build inference panel: one row per segment for the latest window only.
+    # Full segments×hours grid is intractable for hourly; API uses latest-window snapshot.
+    full_panel = build_latest_window_inference_panel(
         event_level_crashes=event_level,
         road_network=road_with_ids,
-        weather_data=None,
+        weather_data=weather_data,
         config=panel_config,
     )
-    logger.info("Full weekly panel shape (snapshot): %s", full_panel.shape)
+    logger.info("Latest-window inference panel shape: %s", full_panel.shape)
 
     panel_path = reports_dir / "panel_latest.parquet"
     full_panel.to_parquet(panel_path, index=False)

@@ -205,21 +205,34 @@ def _get_risk_driver_features_for_segment(segment_id):
 
     row = row.iloc[0]
     keys = [
+        # static segment features
+        "is_oneway",
+        "from_intersection_degree",
+        "to_intersection_degree",
         # temporal context
         "hour_of_day",
         "day_of_week",
         "is_weekend",
         "month",
         "season",
-        # crash history
+        # crash history (weekly-spaced when using weekly windows)
+        "crashes_1_week_ago",
+        "crashes_2_weeks_ago",
+        "crashes_4_weeks_ago",
+        "rolling_mean_4_weeks",
+        "rolling_max_4_weeks",
+        # finer windows (hourly)
         "past_crash_count_1h",
         "past_crash_count_24h",
         "past_crash_count_7d",
+        "rolling_mean_24h",
+        "rolling_max_24h",
         "rolling_mean_7d",
         "rolling_max_30d",
         # weather (if present)
         "temperature",
         "precipitation",
+        "snow_mm",
         "visibility",
         "wind_speed",
         "weather_condition",

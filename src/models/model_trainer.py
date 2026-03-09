@@ -395,6 +395,8 @@ class TemporalCountModelTrainer:
             "datetime_hour",
             "lat_grid",
             "lon_grid",
+            # Raw categorical (use one-hot road_class_* instead)
+            "ROAD_CLASS",
             # Outcome variables (do not use as predictors)
             "crash_count",
             "future_crash_count",
