@@ -135,9 +135,7 @@ def _attach_weather_features(
     panel["datetime_hour"] = panel["window_start"].dt.floor("H")
 
     if weather_data is None or weather_data.empty:
-        logger.warning(
-            "Weather data is missing or empty; skipping weather features."
-        )
+        logger.warning("Weather data is missing or empty; skipping weather features.")
         return panel
 
     if "datetime_hour" not in weather_data.columns:
@@ -186,9 +184,7 @@ def _attach_weather_features(
     # For numeric weather features, forward-fill within each segment_id
     numeric_weather = [c for c in weather_cols if merged[c].dtype != "object"]
     if numeric_weather:
-        merged[numeric_weather] = (
-            merged.groupby("segment_id")[numeric_weather].ffill()
-        )
+        merged[numeric_weather] = merged.groupby("segment_id")[numeric_weather].ffill()
 
     return merged
 
@@ -216,9 +212,9 @@ def _compute_lag_features_from_sparse(
     panel = panel.copy()
     delta = pd.Timedelta(hours=window_size_hours)
 
-    sparse = crash_counts_sparse[["segment_id", "window_start", "crash_count"]].drop_duplicates(
-        subset=["segment_id", "window_start"]
-    )
+    sparse = crash_counts_sparse[
+        ["segment_id", "window_start", "crash_count"]
+    ].drop_duplicates(subset=["segment_id", "window_start"])
 
     if _is_weekly_or_coarser(window_size_hours):
         # Weekly-spaced lags: 1, 2, 4 windows back (distinct signal)
@@ -249,7 +245,11 @@ def _compute_lag_features_from_sparse(
             set(range(1, rolling_window + 1)) | set(lag_steps)
         )
 
-    max_lag = max(lag_steps + [rolling_window]) if _is_weekly_or_coarser(window_size_hours) else max(lag_steps_to_compute)
+    max_lag = (
+        max(lag_steps + [rolling_window])
+        if _is_weekly_or_coarser(window_size_hours)
+        else max(lag_steps_to_compute)
+    )
 
     # Memory-efficient path for fine windows: merge panel with each shifted sparse
     # one at a time instead of building a huge lag_table (avoids OOM).
@@ -287,13 +287,15 @@ def _compute_lag_features_from_sparse(
             shifted = sparse[["segment_id", "window_start", "crash_count"]].copy()
             shifted["window_start"] = shifted["window_start"] + k * delta
             shifted = shifted.rename(columns={"crash_count": f"_lag_{k}"})
-            panel = panel.merge(
-                shifted, on=["segment_id", "window_start"], how="left"
-            )
+            panel = panel.merge(shifted, on=["segment_id", "window_start"], how="left")
             panel[f"_lag_{k}"] = panel[f"_lag_{k}"].fillna(0)
         for step, col_name in zip(lag_steps, lag_col_names):
             panel[col_name] = panel[f"_lag_{step}"]
-        cols_rolling = [f"_lag_{k}" for k in range(1, rolling_window + 1) if f"_lag_{k}" in panel.columns]
+        cols_rolling = [
+            f"_lag_{k}"
+            for k in range(1, rolling_window + 1)
+            if f"_lag_{k}" in panel.columns
+        ]
         if cols_rolling:
             panel[rolling_mean_name] = panel[cols_rolling].mean(axis=1)
             panel[rolling_max_name] = panel[cols_rolling].max(axis=1)
@@ -404,11 +406,24 @@ def build_panel_dataset(
             panel[col] = 0
 
     # 4. Attach static road features and centroids
-    static_cols = ["segment_id", "segment_length", "ROAD_CLASS", "is_oneway", "from_intersection_degree", "to_intersection_degree"]
+    static_cols = [
+        "segment_id",
+        "segment_length",
+        "ROAD_CLASS",
+        "is_oneway",
+        "from_intersection_degree",
+        "to_intersection_degree",
+    ]
     for opt_col in ["FROM_INTERSECTION_ID", "TO_INTERSECTION_ID"]:
         if opt_col in road_network.columns:
             static_cols.append(opt_col)
-    for adt_col in ["avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+    for adt_col in [
+        "avg_daily_vol",
+        "avg_speed",
+        "avg_85th_percentile_speed",
+        "speed_variance",
+        "exposure",
+    ]:
         if adt_col in road_network.columns:
             static_cols.append(adt_col)
 
@@ -432,9 +447,15 @@ def build_panel_dataset(
 
     if _is_weekly_or_coarser(config.window_size_hours):
         # Weekly-spaced lags: 1, 2, 4 windows back (distinct signal)
-        panel["crashes_1_week_ago"] = panel.groupby("segment_id")["crash_count"].shift(1)
-        panel["crashes_2_weeks_ago"] = panel.groupby("segment_id")["crash_count"].shift(2)
-        panel["crashes_4_weeks_ago"] = panel.groupby("segment_id")["crash_count"].shift(4)
+        panel["crashes_1_week_ago"] = panel.groupby("segment_id")["crash_count"].shift(
+            1
+        )
+        panel["crashes_2_weeks_ago"] = panel.groupby("segment_id")["crash_count"].shift(
+            2
+        )
+        panel["crashes_4_weeks_ago"] = panel.groupby("segment_id")["crash_count"].shift(
+            4
+        )
         rolling_window = 4
         rolling_mean_name = "rolling_mean_4_weeks"
         rolling_max_name = "rolling_max_4_weeks"
@@ -442,10 +463,12 @@ def build_panel_dataset(
         steps_24h = max(1, int(round(24 / config.window_size_hours)))
         steps_7d = max(1, int(round((24 * 7) / config.window_size_hours)))
         window_30d = max(1, int(round((24 * 30) / config.window_size_hours)))
-        panel["past_crash_count_1h"] = panel.groupby("segment_id")["crash_count"].shift(1)
-        panel["past_crash_count_24h"] = panel.groupby("segment_id")["crash_count"].shift(
-            steps_24h
+        panel["past_crash_count_1h"] = panel.groupby("segment_id")["crash_count"].shift(
+            1
         )
+        panel["past_crash_count_24h"] = panel.groupby("segment_id")[
+            "crash_count"
+        ].shift(steps_24h)
         panel["past_crash_count_7d"] = panel.groupby("segment_id")["crash_count"].shift(
             steps_7d
         )
@@ -470,9 +493,7 @@ def build_panel_dataset(
 
     # 8. Future labels using correct steps_ahead (H/W)
     k = config.steps_ahead()
-    panel["future_crash_count"] = (
-        panel.groupby("segment_id")["crash_count"].shift(-k)
-    )
+    panel["future_crash_count"] = panel.groupby("segment_id")["crash_count"].shift(-k)
 
     # Drop rows where the future label is NaN (end of history per segment)
     before_drop = len(panel)
@@ -584,9 +605,7 @@ def build_weekly_sampled_future_panel(
     target_neg = negative_multiplier * n_pos
 
     # MultiIndex of positive (segment_id, window_start) for exclusion
-    pos_index = pd.MultiIndex.from_frame(
-        positives[["segment_id", "window_start"]]
-    )
+    pos_index = pd.MultiIndex.from_frame(positives[["segment_id", "window_start"]])
 
     # Over-sample then filter to avoid while-loops
     max_trials = target_neg * 2
@@ -600,9 +619,7 @@ def build_weekly_sampled_future_panel(
         }
     ).drop_duplicates()
 
-    neg_index = pd.MultiIndex.from_frame(
-        neg_candidates[["segment_id", "window_start"]]
-    )
+    neg_index = pd.MultiIndex.from_frame(neg_candidates[["segment_id", "window_start"]])
     mask_not_pos = ~neg_index.isin(pos_index)
     negatives = neg_candidates[mask_not_pos].head(target_neg).copy()
     negatives["crash_count"] = 0
@@ -621,11 +638,24 @@ def build_weekly_sampled_future_panel(
     )
 
     # Step 3: Attach static and temporal features at time t
-    static_cols = ["segment_id", "segment_length", "ROAD_CLASS", "is_oneway", "from_intersection_degree", "to_intersection_degree"]
+    static_cols = [
+        "segment_id",
+        "segment_length",
+        "ROAD_CLASS",
+        "is_oneway",
+        "from_intersection_degree",
+        "to_intersection_degree",
+    ]
     for opt_col in ["FROM_INTERSECTION_ID", "TO_INTERSECTION_ID"]:
         if opt_col in road_network.columns:
             static_cols.append(opt_col)
-    for adt_col in ["avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+    for adt_col in [
+        "avg_daily_vol",
+        "avg_speed",
+        "avg_85th_percentile_speed",
+        "speed_variance",
+        "exposure",
+    ]:
         if adt_col in road_network.columns:
             static_cols.append(adt_col)
 
@@ -641,9 +671,7 @@ def build_weekly_sampled_future_panel(
     panel = _attach_weather_features(panel, weather_data=weather_data)
 
     # Step 3b: Lag and rolling features from sparse crash history
-    panel = _compute_lag_features_from_sparse(
-        panel, crash_counts, window_size_hours
-    )
+    panel = _compute_lag_features_from_sparse(panel, crash_counts, window_size_hours)
 
     # Step 4: Define future label via join on (segment_id, future_window_start)
     horizon_delta = pd.to_timedelta(horizon_hours, unit="H")
@@ -734,7 +762,9 @@ def build_latest_window_inference_panel(
         raise ValueError(f"event_level_crashes missing required columns: {missing}")
 
     if config is None:
-        config = PanelConfig(window_size_hours=window_size_hours, horizon_hours=window_size_hours)
+        config = PanelConfig(
+            window_size_hours=window_size_hours, horizon_hours=window_size_hours
+        )
 
     min_event_ts = event_level_crashes["event_datetime"].min().floor("H")
 
@@ -770,9 +800,18 @@ def build_latest_window_inference_panel(
     inference_idx["crash_count"] = inference_idx["crash_count"].fillna(0)
 
     static_cols = ["segment_id", "segment_length", "ROAD_CLASS"]
-    for c in ["is_oneway", "from_intersection_degree", "to_intersection_degree",
-              "FROM_INTERSECTION_ID", "TO_INTERSECTION_ID",
-              "avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+    for c in [
+        "is_oneway",
+        "from_intersection_degree",
+        "to_intersection_degree",
+        "FROM_INTERSECTION_ID",
+        "TO_INTERSECTION_ID",
+        "avg_daily_vol",
+        "avg_speed",
+        "avg_85th_percentile_speed",
+        "speed_variance",
+        "exposure",
+    ]:
         if c in road_network.columns:
             static_cols.append(c)
     static = road_network[static_cols].drop_duplicates("segment_id")
@@ -842,4 +881,3 @@ def temporal_train_val_test_split(
     )
 
     return train_data, val_data, test_data
-

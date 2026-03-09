@@ -80,6 +80,8 @@ latest_window_start = None
 # Percentile thresholds for mapping λ → risk_label (computed when lambda map is built)
 _lambda_p70 = None
 _lambda_p90 = None
+_lam_values_sorted = None  # for percentile-based display confidence
+crash_count_latest = None  # segment_id -> crash count in latest window
 
 try:
     data_dir = PROJECT_ROOT / "data"
@@ -131,6 +133,43 @@ def _lambda_to_risk_label(lam: float) -> str:
     return "high"
 
 
+def _normalize_segment_id(seg_id) -> Optional[int]:
+    """Normalize segment_id to int for consistent dict lookups (handles float from GeoJSON)."""
+    if seg_id is None or (isinstance(seg_id, float) and np.isnan(seg_id)):
+        return None
+    try:
+        if isinstance(seg_id, (int, np.integer)):
+            return int(seg_id)
+        f = float(seg_id)
+        return None if np.isnan(f) else int(f)
+    except (ValueError, TypeError):
+        return None
+
+
+def _lambda_to_display_confidence(lam: float) -> float:
+    """
+    Map λ to a 0-1 display confidence (percentile rank).
+
+    Raw P(crash) is typically 0.001-0.01, which shows as 0% in the UI.
+    Using percentile rank gives meaningful values: a segment riskier than 80%
+    of others shows 0.8 (80%).
+    """
+    global _lam_values_sorted
+    if _lam_values_sorted is None or len(_lam_values_sorted) == 0:
+        return 0.5
+    if np.isnan(lam) or np.isinf(lam) or lam < 0:
+        return 0.5
+    # If all λ are identical, percentile is degenerate
+    if float(_lam_values_sorted[-1]) <= float(_lam_values_sorted[0]):
+        return 0.5
+    # count of values strictly less than lam
+    rank = int(np.searchsorted(_lam_values_sorted, lam, side="left"))
+    n = len(_lam_values_sorted)
+    # avoid 100% for everyone: use (rank + 0.5) / (n + 1) for smoother 0-1 spread
+    pct = (rank + 0.5) / (n + 1)
+    return float(np.clip(pct, 0.0, 1.0))
+
+
 def _compute_lambda_map_for_latest_window():
     """
     Compute λ_per_hour for each segment in the most recent panel window.
@@ -138,7 +177,7 @@ def _compute_lambda_map_for_latest_window():
     This is used to annotate routing edges with expected crashes and to derive
     risk_label for the iOS app (temporal model replaces classification model).
     """
-    global lambda_per_hour_latest, latest_window_start, _lambda_p70, _lambda_p90
+    global lambda_per_hour_latest, latest_window_start, _lambda_p70, _lambda_p90, _lam_values_sorted, crash_count_latest
 
     if temporal_trainer is None or temporal_trainer.model is None:
         raise RuntimeError("Temporal count model is not loaded.")
@@ -158,14 +197,27 @@ def _compute_lambda_map_for_latest_window():
     window_size_hours = temporal_trainer.panel_config.window_size_hours  # type: ignore[assignment]
     lambda_per_hour = lambda_window / float(window_size_hours)
 
-    # Map segment_id -> λ_per_hour
-    segment_ids = current_slice["segment_id"].values
-    lambda_per_hour_latest = dict(zip(segment_ids, lambda_per_hour))
+    # Map segment_id -> λ_per_hour and crash_count (normalize keys to int for GeoJSON float compatibility)
+    segment_ids_raw = current_slice["segment_id"].values
+    lambda_per_hour_latest = {}
+    crash_count_latest = {}
+    for i, sid in enumerate(segment_ids_raw):
+        nid = _normalize_segment_id(sid)
+        if nid is not None:
+            lam_val = float(lambda_per_hour[i])
+            lambda_per_hour_latest[nid] = lam_val
+            if sid != nid:
+                lambda_per_hour_latest[sid] = lam_val
+            val = current_slice.iloc[i].get("crash_count", 0)
+            crash_count_latest[nid] = int(val) if pd.notna(val) else 0
+            if sid != nid:
+                crash_count_latest[sid] = crash_count_latest[nid]
 
     # Compute percentile thresholds for λ → risk_label mapping (low ≤ p70, medium ≤ p90, high > p90)
     lam_values = np.array(list(lambda_per_hour_latest.values()), dtype=float)
     _lambda_p70 = float(np.percentile(lam_values, 70))
     _lambda_p90 = float(np.percentile(lam_values, 90))
+    _lam_values_sorted = np.sort(lam_values)
     logging.info(
         "Computed λ_per_hour for latest window %s for %d segments (p70=%.6f, p90=%.6f).",
         latest_window_start,
@@ -238,6 +290,41 @@ def _get_risk_driver_features_for_segment(segment_id):
     return drivers
 
 
+def _build_risk_explanation(drivers: dict, risk_label: str, risk_score: int) -> str:
+    """Build human-readable explanation from risk drivers and score."""
+    parts = []
+    if risk_label == "high":
+        parts.append("This segment has elevated crash risk based on current conditions.")
+    elif risk_label == "medium":
+        parts.append("This segment has moderate crash risk.")
+    else:
+        parts.append("This segment has lower crash risk relative to others.")
+
+    if drivers:
+        factors = []
+        hour = drivers.get("hour_of_day")
+        if hour is not None and ((7 <= hour <= 9) or (16 <= hour <= 18)):
+            factors.append("rush hour")
+        if drivers.get("is_weekend"):
+            factors.append("weekend traffic")
+        past_24h = drivers.get("past_crash_count_24h") or drivers.get("crashes_1_week_ago")
+        if past_24h and int(past_24h) > 0:
+            factors.append("recent crash activity")
+        if drivers.get("precipitation", 0) and float(drivers.get("precipitation", 0)) > 0:
+            factors.append("precipitation")
+        if drivers.get("temperature") is not None:
+            temp = float(drivers["temperature"])
+            if temp < 0:
+                factors.append("freezing conditions")
+        if factors:
+            parts.append(" Contributing factors: " + ", ".join(factors) + ".")
+        else:
+            parts.append(" The prediction uses road type, time of day, and crash history.")
+
+    parts.append(f" Risk score: {risk_score}/100 (percentile vs. all segments).")
+    return "".join(parts)
+
+
 @app.route("/api/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
@@ -268,11 +355,17 @@ def get_risk_predictions():
     }
     """
     if road_network is None:
-        return jsonify({"error": "Road network not loaded"}), 500
+        return jsonify({"error": "Road network not loaded", "hint": "Check data/centreline geojson exists"}), 500
     if temporal_trainer is None or temporal_trainer.model is None:
-        return jsonify({"error": "Temporal model not loaded"}), 500
+        return jsonify({
+            "error": "Temporal model not loaded",
+            "hint": "Run: python train_temporal_model.py (ensure scikit-learn matches)",
+        }), 500
     if panel_data is None or panel_data.empty:
-        return jsonify({"error": "Panel data not loaded"}), 500
+        return jsonify({
+            "error": "Panel data not loaded",
+            "hint": "Run: python train_temporal_model.py and pip install pyarrow",
+        }), 500
 
     try:
         data = request.get_json()
@@ -289,9 +382,8 @@ def get_risk_predictions():
 
         def _get_risk_for_row(row):
             seg_id = row.get("segment_id") or row.get("CENTRELINE_ID", row.name)
-            lam = lambda_per_hour_latest.get(seg_id, 0.0)  # type: ignore[union-attr]
-            if lam == 0.0 and isinstance(seg_id, float) and not np.isnan(seg_id):
-                lam = lambda_per_hour_latest.get(int(seg_id), 0.0)  # type: ignore[union-attr]
+            nid = _normalize_segment_id(seg_id)
+            lam = lambda_per_hour_latest.get(nid, 0.0) if nid is not None else 0.0  # type: ignore[union-attr]
             return _lambda_to_risk_label(lam)
 
         segments_in_bbox["risk_label"] = segments_in_bbox.apply(_get_risk_for_row, axis=1)
@@ -305,19 +397,25 @@ def get_risk_predictions():
         for idx, segment in segments_in_bbox.iterrows():
             coords = _extract_coordinates(segment.geometry)
             risk_label = segment["risk_label"]
-            lam = lambda_per_hour_latest.get(segment.get("segment_id") or segment.get("CENTRELINE_ID", idx), 0.0)  # type: ignore[union-attr]
-            wh = temporal_trainer.panel_config.window_size_hours or 1  # type: ignore[union-attr]
-            prob_crash = 1.0 - np.exp(-max(0, lam * wh))
-            confidence = float(np.clip(prob_crash, 0.0, 1.0))
+            seg_id = segment.get("segment_id") or segment.get("CENTRELINE_ID", idx)
+            nid = _normalize_segment_id(seg_id)
+            lam = lambda_per_hour_latest.get(nid, 0.0) if nid is not None else 0.0  # type: ignore[union-attr]
+            confidence = _lambda_to_display_confidence(lam)
+            risk_score = int(round(confidence * 100))
+            recent_crashes = int(crash_count_latest.get(nid, 0)) if crash_count_latest and nid is not None else 0
+            drivers = _get_risk_driver_features_for_segment(nid if nid is not None else seg_id)
+            risk_explanation = _build_risk_explanation(drivers, risk_label, risk_score)
 
             result = {
-                "id": str(segment.get("segment_id", idx)),
+                "id": str(seg_id),
                 "LINEAR_NAME": segment.get("LINEAR_NAME", "Unknown"),
                 "ROAD_CLASS": segment.get("ROAD_CLASS", "Unknown"),
                 "segment_length": float(segment.get("segment_length", 0)),
                 "risk_label": risk_label,
+                "risk_score": risk_score,
                 "confidence": confidence,
-                "num_total_crashes": int(segment.get("num_total_crashes", 0)),
+                "risk_explanation": risk_explanation,
+                "num_total_crashes": recent_crashes,
                 "num_ksi_crashes": int(segment.get("num_ksi_crashes", 0)),
                 "fatality_count": int(segment.get("fatality_count", 0)),
                 "coordinates": coords[:50],
@@ -414,14 +512,15 @@ def get_risk_prediction():
                 _compute_lambda_map_for_latest_window()
 
             seg_id = segment.get("segment_id") or segment.get("CENTRELINE_ID", nearest_idx)
-            lam = lambda_per_hour_latest.get(seg_id, 0.0)  # type: ignore[union-attr]
-            if lam == 0.0 and isinstance(seg_id, float) and not np.isnan(seg_id):
-                lam = lambda_per_hour_latest.get(int(seg_id), 0.0)  # type: ignore[union-attr]
+            nid = _normalize_segment_id(seg_id)
+            lam = lambda_per_hour_latest.get(nid, 0.0) if nid is not None else 0.0  # type: ignore[union-attr]
 
             risk_label = _lambda_to_risk_label(lam)
-            wh = temporal_trainer.panel_config.window_size_hours or 1  # type: ignore[union-attr]
-            prob_crash = 1.0 - np.exp(-max(0, lam * wh))
-            confidence = float(np.clip(prob_crash, 0.0, 1.0))
+            confidence = _lambda_to_display_confidence(lam)
+            risk_score = int(round(confidence * 100))
+            recent_crashes = int(crash_count_latest.get(nid, 0)) if crash_count_latest and nid is not None else 0
+            drivers = _get_risk_driver_features_for_segment(nid if nid is not None else seg_id)
+            risk_explanation = _build_risk_explanation(drivers, risk_label, risk_score)
 
             if risk_label == "high":
                 probabilities = {"low": 0.1, "medium": 0.1, "high": 0.8}
@@ -431,11 +530,13 @@ def get_risk_prediction():
                 probabilities = {"low": 0.8, "medium": 0.15, "high": 0.05}
 
             segment_info = {
-                "id": str(segment.get("segment_id", nearest_idx)),
+                "id": str(seg_id),
                 "LINEAR_NAME": segment.get("LINEAR_NAME", "Unknown"),
                 "ROAD_CLASS": segment.get("ROAD_CLASS", "Unknown"),
                 "segment_length": float(segment.get("segment_length", 0)),
-                "num_total_crashes": int(segment.get("num_total_crashes", 0)),
+                "risk_score": risk_score,
+                "risk_explanation": risk_explanation,
+                "num_total_crashes": recent_crashes,
                 "num_ksi_crashes": int(segment.get("num_ksi_crashes", 0)),
                 "fatality_count": int(segment.get("fatality_count", 0)),
                 "coordinates": _extract_coordinates(segment.geometry),
@@ -443,6 +544,8 @@ def get_risk_prediction():
 
             response = {
                 "riskLevel": risk_label,
+                "riskScore": risk_score,
+                "riskExplanation": risk_explanation,
                 "confidence": confidence,
                 "probabilities": probabilities,
                 "segmentInfo": segment_info,
@@ -541,8 +644,9 @@ def get_safety_aware_route():
         # Build risk driver explanations for avoided segments
         avoided_details = []
         for seg_id in avoided_segments:
-            lam = float(lambda_per_hour_latest.get(seg_id, 0.0)) if lambda_per_hour_latest is not None else 0.0
-            drivers = _get_risk_driver_features_for_segment(seg_id)
+            nid = _normalize_segment_id(seg_id)
+            lam = float(lambda_per_hour_latest.get(nid, 0.0)) if lambda_per_hour_latest and nid is not None else 0.0
+            drivers = _get_risk_driver_features_for_segment(nid if nid is not None else seg_id)
             avoided_details.append(
                 {
                     "segmentId": seg_id,
@@ -1069,13 +1173,10 @@ def get_all_segments():
                     if lambda_per_hour_latest is None:
                         _compute_lambda_map_for_latest_window()
                     seg_id = segment.get("segment_id") or segment.get("CENTRELINE_ID", idx)
-                    lam = lambda_per_hour_latest.get(seg_id, 0.0)  # type: ignore[union-attr]
-                    if lam == 0.0 and isinstance(seg_id, float) and not np.isnan(seg_id):
-                        lam = lambda_per_hour_latest.get(int(seg_id), 0.0)  # type: ignore[union-attr]
+                    nid = _normalize_segment_id(seg_id)
+                    lam = lambda_per_hour_latest.get(nid, 0.0) if nid is not None else 0.0  # type: ignore[union-attr]
                     risk_label = _lambda_to_risk_label(lam)
-                    wh = temporal_trainer.panel_config.window_size_hours or 1  # type: ignore[union-attr]
-                    prob_crash = 1.0 - np.exp(-max(0, lam * wh))
-                    confidence = float(np.clip(prob_crash, 0.0, 1.0))
+                    confidence = _lambda_to_display_confidence(lam)
                 except Exception as e:
                     logging.debug(f"Could not compute temporal risk for segment {idx}: {e}")
                     confidence = 0.5
@@ -2137,4 +2238,5 @@ def _get_data_validation_html():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=False)
+    # threaded=False avoids GEOS/Shapely double-free on macOS when handling concurrent requests
+    app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=False, threaded=False)
