@@ -266,8 +266,9 @@ def load_model_dataset(data_dir: Path) -> Optional[pd.DataFrame]:
     """
     Load optional traffic volume/speed data (model_dataset.csv) by segment.
 
-    Expected columns: centreline_id, avg_daily_vol, avg_speed,
-    avg_85th_percentile_speed, speed_variance, exposure.
+    Keeps only traffic-related columns that are safe to use as features.
+    Explicitly excludes crash_count / crash_rate to prevent target leakage.
+
     Returns None if file not found.
     """
     from config import MODEL_DATASET_FILE
@@ -291,22 +292,45 @@ def load_model_dataset(data_dir: Path) -> Optional[pd.DataFrame]:
         )
         return None
 
-    cols = ["segment_id", "avg_daily_vol", "avg_speed"]
-    for c in ["avg_85th_percentile_speed", "speed_variance", "exposure"]:
-        if c in df.columns:
-            cols.append(c)
-    df = df[[c for c in cols if c in df.columns]].drop_duplicates("segment_id")
-    logger.info("Loaded model dataset: %d segments with ADT/speed", len(df))
+    # Pick only traffic volume/speed columns — NOT crash-derived columns.
+    # segment_length is excluded because the road network already has it
+    # computed from geometry (more accurate than the CSV approximation).
+    SAFE_COLS = [
+        "avg_daily_vol",
+        "avg_speed",
+        "avg_85th_percentile_speed",
+        "avg_95th_percentile_speed",
+        "speed_variance",
+        "exposure",
+        "avg_wkdy_am_peak_vol",
+        "avg_wkdy_pm_peak_vol",
+        "avg_heavy_pct",
+        "log_volume",
+    ]
+    keep = ["segment_id"] + [c for c in SAFE_COLS if c in df.columns]
+    df = df[keep].drop_duplicates("segment_id")
+
+    n_with_vol = (df["avg_daily_vol"] > 0).sum() if "avg_daily_vol" in df.columns else 0
+    logger.info(
+        "Loaded model dataset: %d segments, %d with non-zero avg_daily_vol. Columns: %s",
+        len(df), n_with_vol, [c for c in keep if c != "segment_id"],
+    )
     return df
 
 
 def load_historical_weather(data_dir: Path) -> Optional[pd.DataFrame]:
     """
-    Load historical weather from historicalweather.csv (daily Toronto station data).
+    Load historical weather from historicalweather.csv (NOAA GHCN daily data).
     Expands to hourly, converts units, and produces city-wide weather for panel join.
 
-    Output columns: datetime_hour, temperature (°C), precipitation (mm), snow_mm.
-    No lat_grid/lon_grid - treated as city-wide; panel join uses datetime_hour only.
+    Handles the standard NCEI/NOAA CSV export with columns:
+    STATION, NAME, DATE, TAVG, TMAX, TMIN, PRCP, SNWD, AWND, etc.
+
+    Output columns (per hourly row):
+        datetime_hour, temperature (°C), precipitation (mm), snow_depth_mm,
+        is_freezing (bool), is_precip (bool)
+
+    No lat_grid/lon_grid — treated as city-wide; panel join uses datetime_hour only.
     Returns None if file not found.
     """
     try:
@@ -320,57 +344,84 @@ def load_historical_weather(data_dir: Path) -> Optional[pd.DataFrame]:
         return None
 
     logger.info("Loading historical weather from %s", file_path)
-    df = pd.read_csv(file_path, skiprows=1)
+    df = pd.read_csv(file_path)
     df.columns = df.columns.str.strip()
+    logger.info("Raw weather CSV: %d rows, columns: %s", len(df), list(df.columns))
 
-    # Map columns (handle varying names)
-    date_col = "Date" if "Date" in df.columns else df.columns[0]
+    # --- Parse date ---
+    date_col = next(
+        (c for c in df.columns if c.upper() == "DATE"),
+        df.columns[0],
+    )
     df["date"] = pd.to_datetime(df[date_col], errors="coerce")
     df = df.dropna(subset=["date"])
 
-    # Extract numeric columns
-    tavg_col = next((c for c in df.columns if "TAVG" in c.upper()), None)
-    tmax_col = next((c for c in df.columns if "TMAX" in c.upper()), None)
-    tmin_col = next((c for c in df.columns if "TMIN" in c.upper()), None)
-    prcp_col = next((c for c in df.columns if "PRCP" in c.upper()), None)
-    snow_col = next((c for c in df.columns if "SNOW" in c.upper()), None)
+    # --- Helper: find column by substring (case-insensitive) ---
+    def _find_col(pattern: str) -> Optional[str]:
+        for c in df.columns:
+            if c.upper() == pattern.upper():
+                return c
+        return None
 
-    # Temperature: TAVG or (TMAX+TMIN)/2, convert °F -> °C
-    if tavg_col and tavg_col in df.columns:
+    # --- Temperature: TAVG preferred, else (TMAX+TMIN)/2.  °F → °C ---
+    tavg_col = _find_col("TAVG")
+    tmax_col = _find_col("TMAX")
+    tmin_col = _find_col("TMIN")
+
+    if tavg_col:
         temp_f = pd.to_numeric(df[tavg_col], errors="coerce")
     elif tmax_col and tmin_col:
         tmax = pd.to_numeric(df[tmax_col], errors="coerce")
         tmin = pd.to_numeric(df[tmin_col], errors="coerce")
         temp_f = (tmax + tmin) / 2
     else:
-        temp_f = np.nan
+        temp_f = pd.Series(np.nan, index=df.index)
     df["temperature"] = (temp_f - 32) * 5 / 9
 
-    # Precipitation: inches -> mm (×25.4)
-    if prcp_col and prcp_col in df.columns:
-        prcp_in = pd.to_numeric(df[prcp_col], errors="coerce").fillna(0)
-        df["precipitation"] = prcp_in * 25.4
+    # --- Precipitation: inches → mm ---
+    prcp_col = _find_col("PRCP")
+    if prcp_col:
+        df["precipitation"] = pd.to_numeric(df[prcp_col], errors="coerce").fillna(0) * 25.4
     else:
         df["precipitation"] = 0.0
 
-    # Snow: inches -> mm (optional)
-    if snow_col and snow_col in df.columns:
-        snow_in = pd.to_numeric(df[snow_col], errors="coerce").fillna(0)
-        df["snow_mm"] = snow_in * 25.4
+    # --- Snow depth: SNWD (inches → mm).  NOAA uses SNWD for depth, SNOW for fall ---
+    snwd_col = _find_col("SNWD") or _find_col("SNOW")
+    if snwd_col:
+        df["snow_depth_mm"] = pd.to_numeric(df[snwd_col], errors="coerce").fillna(0) * 25.4
     else:
-        df["snow_mm"] = 0.0
+        df["snow_depth_mm"] = 0.0
 
-    # Expand daily to hourly: one row per hour (00:00..23:00) for each date
+    # --- Wind speed: AWND (mph → m/s) if available ---
+    awnd_col = _find_col("AWND")
+    if awnd_col:
+        df["wind_speed"] = pd.to_numeric(df[awnd_col], errors="coerce").fillna(0) * 0.44704
+    else:
+        df["wind_speed"] = 0.0
+
+    # --- Derived binary flags ---
+    df["is_freezing"] = (df["temperature"] <= 0).astype(int)
+    df["is_precip"] = (df["precipitation"] > 0).astype(int)
+
+    # --- Expand daily → hourly (one row per hour 00:00–23:00) ---
+    feature_cols = ["temperature", "precipitation", "snow_depth_mm",
+                    "wind_speed", "is_freezing", "is_precip"]
     dfs = []
     for h in range(24):
-        w = df[["date", "temperature", "precipitation", "snow_mm"]].copy()
+        w = df[["date"] + feature_cols].copy()
         w["datetime_hour"] = w["date"].dt.normalize() + pd.Timedelta(hours=h)
         w = w.drop(columns=["date"])
         dfs.append(w)
     weather = pd.concat(dfs, ignore_index=True)
-    weather = weather.drop_duplicates(subset=["datetime_hour"])
-    logger.info("Historical weather: %d hourly rows (%s to %s)", len(weather),
-                weather["datetime_hour"].min(), weather["datetime_hour"].max())
+    weather = weather.drop_duplicates(subset=["datetime_hour"]).sort_values("datetime_hour")
+
+    logger.info(
+        "Historical weather: %d hourly rows (%s to %s), features: %s",
+        len(weather),
+        weather["datetime_hour"].min(),
+        weather["datetime_hour"].max(),
+        feature_cols,
+    )
     return weather
 
 

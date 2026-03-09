@@ -389,14 +389,26 @@ class TemporalCountModelTrainer:
             raise ValueError(f"Target column '{target_col}' not found in panel.")
 
         exclude = {
+            # Identifiers — these let the model memorise segments, not learn patterns
             "segment_id",
+            "FROM_INTERSECTION_ID",
+            "TO_INTERSECTION_ID",
+            # Spatial coordinates used only for weather joins, not as features
+            "segment_centroid_lat",
+            "segment_centroid_lon",
+            # Time columns
             "window_start",
             "future_window_start",
             "datetime_hour",
             "lat_grid",
             "lon_grid",
-            # Raw categorical (use one-hot road_class_* instead)
+            # Raw categoricals replaced by one-hot / integer encodings
             "ROAD_CLASS",
+            "season",
+            # Raw integer hour/day kept only for cyclical encoding
+            "hour_of_day",
+            "day_of_week",
+            "month",
             # Outcome variables (do not use as predictors)
             "crash_count",
             "future_crash_count",
@@ -427,6 +439,7 @@ class TemporalCountModelTrainer:
 
         self.feature_columns = feature_cols
         logger.info("Panel features prepared: %d features, %d samples.", len(feature_cols), len(X))
+        logger.info("Feature columns: %s", feature_cols)
 
         return X, y
 

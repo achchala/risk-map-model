@@ -123,6 +123,39 @@ def _add_tail_weighted_sample_weights(
     return panel
 
 
+def _log_panel_feature_summary(panel: pd.DataFrame, logger: logging.Logger) -> None:
+    """Log a concise feature summary so we can verify the model sees real variation."""
+    logger.info("--- Panel Feature Summary ---")
+    logger.info("Columns (%d): %s", len(panel.columns), list(panel.columns))
+
+    if "window_start" in panel.columns:
+        ws = pd.to_datetime(panel["window_start"])
+        logger.info(
+            "window_start range: %s to %s, %d unique values",
+            ws.min(), ws.max(), ws.nunique(),
+        )
+        if "hour_of_day" in panel.columns:
+            logger.info("hour_of_day unique values: %s", sorted(panel["hour_of_day"].unique()))
+        if "day_of_week" in panel.columns:
+            logger.info("day_of_week unique values: %s", sorted(panel["day_of_week"].unique()))
+
+    rc_cols = [c for c in panel.columns if c.startswith("road_class_")]
+    logger.info("road_class one-hot columns (%d): %s", len(rc_cols), rc_cols)
+
+    for col in ["is_oneway", "from_intersection_degree", "to_intersection_degree",
+                 "segment_length", "hist_crashes_per_year", "hist_crash_hour_ratio",
+                 "hist_crash_weekend_ratio", "is_missing_weather",
+                 "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+                 "season_int", "month_sin", "month_cos"]:
+        if col in panel.columns:
+            vals = pd.to_numeric(panel[col], errors="coerce")
+            logger.info(
+                "  %s: nunique=%d, mean=%.4f, zero%%=%.1f%%",
+                col, vals.nunique(), vals.mean(), 100 * (vals == 0).mean(),
+            )
+    logger.info("--- End Feature Summary ---")
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -183,6 +216,9 @@ def main() -> None:
         horizon_hours=panel_config.horizon_hours,
     )
     logger.info("Hourly training panel shape: %s", training_panel.shape)
+
+    # 4a-QA) Log feature summary so we can verify the model gets real variation.
+    _log_panel_feature_summary(training_panel, logger)
 
     # 4b) Build inference panel: one row per segment for the latest window only.
     # Full segments×hours grid is intractable for hourly; API uses latest-window snapshot.

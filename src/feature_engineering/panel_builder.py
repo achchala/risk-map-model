@@ -30,6 +30,21 @@ from config import SEASON_MAPPING  # type: ignore
 
 logger = logging.getLogger(__name__)
 
+# Traffic volume/speed columns that may be present on the road network after
+# merging model_dataset.csv.  Used when selecting static features for the panel.
+_TRAFFIC_VOLUME_COLS = [
+    "avg_daily_vol",
+    "avg_speed",
+    "avg_85th_percentile_speed",
+    "avg_95th_percentile_speed",
+    "speed_variance",
+    "exposure",
+    "avg_wkdy_am_peak_vol",
+    "avg_wkdy_pm_peak_vol",
+    "avg_heavy_pct",
+    "log_volume",
+]
+
 
 @dataclass
 class PanelConfig:
@@ -80,14 +95,29 @@ def _add_temporal_indicators(
     For weekly (or coarser) windows, skips hour_of_day, day_of_week, is_weekend
     (they carry no real signal — each window spans 7 days). Keeps month and
     season which vary meaningfully.
+
+    All cyclical quantities (hour, day_of_week, month) are encoded as sin/cos
+    pairs so the model can learn periodicity (e.g. hour 23 is close to hour 0).
+    Season is encoded as an integer (0-3) instead of a string.
     """
+    SEASON_INT = {"winter": 0, "spring": 1, "summer": 2, "fall": 3}
+
     panel = panel.copy()
     panel["month"] = panel["window_start"].dt.month
-    panel["season"] = panel["month"].map(SEASON_MAPPING)
+    panel["month_sin"] = np.sin(2 * np.pi * panel["month"] / 12)
+    panel["month_cos"] = np.cos(2 * np.pi * panel["month"] / 12)
+
+    season_str = panel["month"].map(SEASON_MAPPING)
+    panel["season_int"] = season_str.map(SEASON_INT).fillna(0).astype(int)
+
     if window_size_hours is None or not _is_weekly_or_coarser(window_size_hours):
         panel["hour_of_day"] = panel["window_start"].dt.hour
+        panel["hour_sin"] = np.sin(2 * np.pi * panel["hour_of_day"] / 24)
+        panel["hour_cos"] = np.cos(2 * np.pi * panel["hour_of_day"] / 24)
         panel["day_of_week"] = panel["window_start"].dt.dayofweek
-        panel["is_weekend"] = panel["day_of_week"].isin([5, 6])
+        panel["dow_sin"] = np.sin(2 * np.pi * panel["day_of_week"] / 7)
+        panel["dow_cos"] = np.cos(2 * np.pi * panel["day_of_week"] / 7)
+        panel["is_weekend"] = panel["day_of_week"].isin([5, 6]).astype(int)
     return panel
 
 
@@ -174,23 +204,99 @@ def _attach_weather_features(
         in {
             "temperature",
             "precipitation",
-            "visibility",
+            "snow_depth_mm",
             "wind_speed",
-            "weather_condition",
+            "is_freezing",
+            "is_precip",
+            # Legacy names kept for backwards compat
+            "visibility",
             "snow_mm",
         }
     ]
 
     merged["is_missing_weather"] = merged[weather_cols].isna().all(axis=1)
 
-    # For numeric weather features, forward-fill within each segment_id
     numeric_weather = [c for c in weather_cols if merged[c].dtype != "object"]
     if numeric_weather:
         merged[numeric_weather] = (
-            merged.groupby("segment_id")[numeric_weather].ffill()
+            merged.groupby("segment_id")[numeric_weather].ffill().fillna(0)
         )
 
     return merged
+
+
+def _compute_historical_crash_profiles(
+    panel: pd.DataFrame,
+    event_level_crashes: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Add aggregated historical crash features per segment that provide
+    meaningful signal at hourly granularity (where raw lags are ~99% zeros).
+
+    Features added:
+    - hist_crashes_per_year: average annual crash count for this segment
+    - hist_crash_hour_ratio: fraction of this segment's crashes that occurred
+      in the same hour-of-day bucket (4 bins) as the current window
+    - hist_crash_weekend_ratio: fraction of crashes on weekends for this segment
+    """
+    panel = panel.copy()
+    crashes = event_level_crashes.copy()
+
+    if "event_datetime" not in crashes.columns or "segment_id" not in crashes.columns:
+        panel["hist_crashes_per_year"] = 0.0
+        panel["hist_crash_hour_ratio"] = 0.0
+        panel["hist_crash_weekend_ratio"] = 0.0
+        return panel
+
+    crashes["event_datetime"] = pd.to_datetime(crashes["event_datetime"])
+
+    # Total crashes per segment
+    seg_total = crashes.groupby("segment_id").size().rename("_total_crashes")
+
+    # Time span in years for rate normalization
+    date_range_years = max(
+        (crashes["event_datetime"].max() - crashes["event_datetime"].min()).days / 365.25,
+        1.0,
+    )
+    seg_rate = (seg_total / date_range_years).rename("hist_crashes_per_year")
+    panel = panel.merge(seg_rate, on="segment_id", how="left")
+    panel["hist_crashes_per_year"] = panel["hist_crashes_per_year"].fillna(0.0)
+
+    # Hour-bucket profile: 6-hour bins (0-5, 6-11, 12-17, 18-23)
+    crashes["_hour_bucket"] = (crashes["event_datetime"].dt.hour // 6).astype(np.int64)
+    bucket_counts = crashes.groupby(["segment_id", "_hour_bucket"]).size().rename("_bucket_n")
+    bucket_counts = bucket_counts.reset_index()
+    bucket_total = crashes.groupby("segment_id").size().rename("_seg_n")
+    bucket_counts = bucket_counts.merge(bucket_total, on="segment_id", how="left")
+    bucket_counts["_ratio"] = bucket_counts["_bucket_n"] / bucket_counts["_seg_n"]
+
+    if "hour_of_day" in panel.columns:
+        panel["_hour_bucket"] = (panel["hour_of_day"].astype(int) // 6).astype(np.int64)
+    else:
+        panel["_hour_bucket"] = np.int64(0)
+
+    bucket_counts["_hour_bucket"] = bucket_counts["_hour_bucket"].astype(np.int64)
+    bucket_counts["segment_id"] = bucket_counts["segment_id"].astype(panel["segment_id"].dtype)
+
+    panel = panel.merge(
+        bucket_counts[["segment_id", "_hour_bucket", "_ratio"]].rename(
+            columns={"_ratio": "hist_crash_hour_ratio"}
+        ),
+        on=["segment_id", "_hour_bucket"],
+        how="left",
+    )
+    panel["hist_crash_hour_ratio"] = panel["hist_crash_hour_ratio"].fillna(0.0)
+    panel.drop(columns=["_hour_bucket"], inplace=True)
+
+    # Weekend ratio
+    crashes["_is_wknd"] = crashes["event_datetime"].dt.dayofweek.isin([5, 6]).astype(int)
+    wknd_ratio = (
+        crashes.groupby("segment_id")["_is_wknd"].mean().rename("hist_crash_weekend_ratio")
+    )
+    panel = panel.merge(wknd_ratio, on="segment_id", how="left")
+    panel["hist_crash_weekend_ratio"] = panel["hist_crash_weekend_ratio"].fillna(0.0)
+
+    return panel
 
 
 def _is_weekly_or_coarser(window_size_hours: int) -> bool:
@@ -404,15 +510,15 @@ def build_panel_dataset(
             panel[col] = 0
 
     # 4. Attach static road features and centroids
-    static_cols = ["segment_id", "segment_length", "ROAD_CLASS", "is_oneway", "from_intersection_degree", "to_intersection_degree"]
-    for opt_col in ["FROM_INTERSECTION_ID", "TO_INTERSECTION_ID"]:
-        if opt_col in road_network.columns:
-            static_cols.append(opt_col)
-    for adt_col in ["avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+    static_cols = [
+        "segment_id", "segment_length", "ROAD_CLASS",
+        "is_oneway", "from_intersection_degree", "to_intersection_degree",
+    ]
+    for adt_col in _TRAFFIC_VOLUME_COLS:
         if adt_col in road_network.columns:
             static_cols.append(adt_col)
-
-    static = road_network[static_cols].drop_duplicates("segment_id")
+    available = [c for c in static_cols if c in road_network.columns]
+    static = road_network[available].drop_duplicates("segment_id")
     static = _encode_road_class_onehot(static, road_network)
     centroids = _compute_segment_centroids(road_network)
 
@@ -620,16 +726,18 @@ def build_weekly_sampled_future_panel(
         ignore_index=True,
     )
 
-    # Step 3: Attach static and temporal features at time t
-    static_cols = ["segment_id", "segment_length", "ROAD_CLASS", "is_oneway", "from_intersection_degree", "to_intersection_degree"]
-    for opt_col in ["FROM_INTERSECTION_ID", "TO_INTERSECTION_ID"]:
-        if opt_col in road_network.columns:
-            static_cols.append(opt_col)
-    for adt_col in ["avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+    # Step 3: Attach static and temporal features at time t.
+    # Only include genuinely informative road attributes — NOT raw IDs that
+    # let the model memorise individual segments instead of learning patterns.
+    static_cols = [
+        "segment_id", "segment_length", "ROAD_CLASS",
+        "is_oneway", "from_intersection_degree", "to_intersection_degree",
+    ]
+    for adt_col in _TRAFFIC_VOLUME_COLS:
         if adt_col in road_network.columns:
             static_cols.append(adt_col)
-
-    static = road_network[static_cols].drop_duplicates("segment_id")
+    available = [c for c in static_cols if c in road_network.columns]
+    static = road_network[available].drop_duplicates("segment_id")
     static = _encode_road_class_onehot(static, road_network)
     centroids = _compute_segment_centroids(road_network)
 
@@ -644,6 +752,9 @@ def build_weekly_sampled_future_panel(
     panel = _compute_lag_features_from_sparse(
         panel, crash_counts, window_size_hours
     )
+
+    # Step 3c: Aggregated historical crash profiles (meaningful at hourly granularity)
+    panel = _compute_historical_crash_profiles(panel, event_level_crashes)
 
     # Step 4: Define future label via join on (segment_id, future_window_start)
     horizon_delta = pd.to_timedelta(horizon_hours, unit="H")
@@ -769,13 +880,13 @@ def build_latest_window_inference_panel(
     )
     inference_idx["crash_count"] = inference_idx["crash_count"].fillna(0)
 
-    static_cols = ["segment_id", "segment_length", "ROAD_CLASS"]
-    for c in ["is_oneway", "from_intersection_degree", "to_intersection_degree",
-              "FROM_INTERSECTION_ID", "TO_INTERSECTION_ID",
-              "avg_daily_vol", "avg_speed", "avg_85th_percentile_speed", "speed_variance", "exposure"]:
+    static_cols = ["segment_id", "segment_length", "ROAD_CLASS",
+                    "is_oneway", "from_intersection_degree", "to_intersection_degree"]
+    for c in _TRAFFIC_VOLUME_COLS:
         if c in road_network.columns:
             static_cols.append(c)
-    static = road_network[static_cols].drop_duplicates("segment_id")
+    available = [c for c in static_cols if c in road_network.columns]
+    static = road_network[available].drop_duplicates("segment_id")
     static = _encode_road_class_onehot(static, road_network)
     centroids = _compute_segment_centroids(road_network)
 
@@ -787,6 +898,7 @@ def build_latest_window_inference_panel(
     panel = _compute_lag_features_from_sparse(
         panel, crash_counts, config.window_size_hours
     )
+    panel = _compute_historical_crash_profiles(panel, event_level_crashes)
 
     panel["future_crash_count"] = 0.0
     logger.info(
