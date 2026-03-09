@@ -74,15 +74,9 @@ struct RiskListRow: View {
             
             Spacer()
             
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(segment.displayRiskScore)")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .foregroundColor(Color(hex: segment.riskLevel.color))
-                Text("risk score")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
         .padding(.vertical, 4)
     }

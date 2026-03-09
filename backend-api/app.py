@@ -156,19 +156,57 @@ for path in PANEL_PATHS:
         continue
 
 
+# Cache for tail percentiles when distribution has a mass point (e.g. 99% at floor)
+_tail_floor_cache: Optional[float] = None
+_tail_p70_cache: Optional[float] = None
+_tail_cache_arr_id: Optional[int] = None
+
+
 def _lambda_to_risk_label(
     lam: float,
     p70: Optional[float] = None,
     p90: Optional[float] = None,
+    lam_values_sorted: Optional[np.ndarray] = None,
 ) -> str:
     """
-    Map λ (crashes per hour) to risk_label (low/medium/high) using percentile thresholds.
+    Map λ (crashes per hour) to risk_label (low/medium/high).
+    When distribution is degenerate (p70≈p90, mass at floor), use percentiles
+    of the non-floor "tail" so we get a meaningful medium bucket.
     """
-    global _lambda_p70, _lambda_p90
+    global _lambda_p70, _lambda_p90, _lam_values_sorted
+    global _tail_floor_cache, _tail_p70_cache, _tail_cache_arr_id
     p70 = p70 if p70 is not None else _lambda_p70
     p90 = p90 if p90 is not None else _lambda_p90
+    arr = lam_values_sorted if lam_values_sorted is not None else _lam_values_sorted
     if p70 is None or p90 is None:
-        return "low"  # fallback if thresholds not yet computed
+        return "low"
+    lam_safe = max(lam, 0.0)
+    # Degenerate: p70 and p90 nearly identical (mass point at floor)
+    degenerate = p90 <= p70 * 1.001 or (
+        arr is not None and len(arr) > 0 and float(arr[-1]) <= float(arr[0]) * 1.001
+    )
+    if degenerate:
+        if arr is None or len(arr) == 0:
+            return "low"
+        arr_id = id(arr)
+        if _tail_cache_arr_id != arr_id:
+            floor = float(np.min(arr))
+            # Values strictly above floor (the "tail")
+            tail = arr[arr > floor * 1.0001]
+            if len(tail) < 2:
+                _tail_floor_cache = floor
+                _tail_p70_cache = floor  # no split possible
+            else:
+                _tail_floor_cache = floor
+                _tail_p70_cache = float(np.percentile(tail, 70))
+            _tail_cache_arr_id = arr_id
+        floor, p70_tail = _tail_floor_cache, _tail_p70_cache
+        if lam_safe <= floor * 1.0001:
+            return "low"
+        if lam_safe <= p70_tail:
+            return "medium"
+        return "high"
+    # Normal linear percentiles
     if lam <= p70:
         return "low"
     if lam <= p90:
@@ -501,70 +539,219 @@ def _calculate_time_risk_multiplier(time_data: Optional[dict]) -> float:
 
 
 def _adjust_risk_for_conditions(
-    risk_label: str, risk_score: int, weather_mult: float, time_mult: float
+    risk_label: str,
+    risk_score: int,
+    weather_mult: float,
+    time_mult: float,
+    lam: float = 0.0,
+    recent_crashes: Optional[int] = None,
+    segment: Optional[Any] = None,
 ) -> tuple[str, int]:
     """
     Adjust risk_label and risk_score based on weather and time multipliers.
-    Returns (adjusted_risk_label, adjusted_risk_score).
+    Caps upgrades so zero-crash, low-exposure segments (trails, short paths)
+    never become "high" — they were likely misclassified by percentile.
     """
     risk_values = {"low": 1, "medium": 2, "high": 3}
     base = risk_values.get(risk_label, 1)
     combined = weather_mult * time_mult
     adj_value = base * combined
 
-    if adj_value >= 2.5:
+    if adj_value >= 2.7:
         new_label = "high"
     elif adj_value >= 1.5:
         new_label = "medium"
     else:
         new_label = "low"
 
+    # Override: zero-crash trails/paths should never be "high" (percentile noise)
+    # Only apply to true low-exposure types — not all short segments.
+    crashes = recent_crashes if recent_crashes is not None else 0
+    road_class = ""
+    if segment is not None:
+        road_class = str(segment.get("ROAD_CLASS") or segment.get("road_class") or "").lower()
+
+    low_exposure_type = road_class in (
+        "trail", "path", "walkway", "pedestrian", "cycle", "bike", "park"
+    )
+    if crashes == 0 and low_exposure_type and new_label == "high":
+        new_label = "medium"  # cap trails/paths with no crashes at medium
+
     adj_score = min(100, int(risk_score * combined))
     return new_label, adj_score
 
 
-def _build_risk_explanation(drivers: dict, risk_label: str, risk_score: int) -> str:
-    """Build human-readable explanation from risk drivers and score."""
-    parts = []
-    if risk_label == "high":
-        parts.append(
-            "This segment has elevated crash risk based on current conditions."
-        )
-    elif risk_label == "medium":
-        parts.append("This segment has moderate crash risk.")
-    else:
-        parts.append("This segment has lower crash risk relative to others.")
+def _weather_condition_display_name(condition: str) -> str:
+    """Convert API condition to display name."""
+    names = {
+        "clear": "Clear",
+        "cloudy": "Cloudy",
+        "mist": "Mist",
+        "rain": "Rain",
+        "heavy_rain": "Heavy rain",
+        "snow": "Snow",
+        "heavy_snow": "Heavy snow",
+        "fog": "Fog",
+        "thunderstorm": "Thunderstorm",
+        "sleet": "Sleet",
+    }
+    return names.get((condition or "").lower(), (condition or "unknown").replace("_", " "))
 
-    if drivers:
-        factors = []
-        hour = drivers.get("hour_of_day")
-        if hour is not None and ((7 <= hour <= 9) or (16 <= hour <= 18)):
-            factors.append("rush hour")
-        if drivers.get("is_weekend"):
-            factors.append("weekend traffic")
-        past_24h = drivers.get("past_crash_count_24h") or drivers.get(
-            "crashes_1_week_ago"
-        )
-        if past_24h and int(past_24h) > 0:
-            factors.append("recent crash activity")
-        if (
-            drivers.get("precipitation", 0)
-            and float(drivers.get("precipitation", 0)) > 0
-        ):
-            factors.append("precipitation")
-        if drivers.get("temperature") is not None:
-            temp = float(drivers["temperature"])
-            if temp < 0:
-                factors.append("freezing conditions")
-        if factors:
-            parts.append(" Contributing factors: " + ", ".join(factors) + ".")
-        else:
+
+def _build_risk_explanation(
+    drivers: dict,
+    risk_label: str,
+    risk_score: int,
+    segment=None,
+    recent_crashes: Optional[int] = None,
+    weather_data: Optional[dict] = None,
+    time_data: Optional[dict] = None,
+    weather_mult: float = 1.0,
+    time_mult: float = 1.0,
+) -> str:
+    """Build human-readable explanation from risk drivers and segment context."""
+    parts = []
+
+    # Segment context (road type, crash history)
+    road_class = "road"
+    num_ksi = 0
+    if segment is not None:
+        road_class = (segment.get("ROAD_CLASS") or segment.get("road_class") or "road")
+        num_ksi = int(segment.get("num_ksi_crashes", 0) or 0)
+    num_crashes = recent_crashes if recent_crashes is not None else 0
+
+    parts.append(f"This {str(road_class).lower()} segment")
+    if num_crashes > 0 or num_ksi > 0:
+        if num_ksi > 0:
             parts.append(
-                " The prediction uses road type, time of day, and crash history."
+                f" has {num_crashes} crash(es) in the recent period, including "
+                f"{num_ksi} serious injury or fatality."
+            )
+        else:
+            parts.append(f" has {num_crashes} crash(es) in the recent period.")
+    else:
+        parts.append(" has no crashes in the recent model window.")
+
+    # AADT / traffic volume (model input)
+    avg_daily = None
+    if segment is not None:
+        for col in ("avg_daily_vol", "avg_daily_traffic", "aadt"):
+            val = segment.get(col)
+            if val is not None:
+                try:
+                    v = float(val)
+                    if v > 0:
+                        avg_daily = int(round(v))
+                        break
+                except (TypeError, ValueError):
+                    pass
+    if avg_daily is not None:
+        desc = "high-traffic; " if avg_daily >= 10000 else ""
+        parts.append(
+            f" Traffic volume: ~{avg_daily:,} vehicles/day ({desc}used in model)."
+        )
+
+    # Time context from drivers or request
+    hour = (time_data or {}).get("hour")
+    if hour is None:
+        hour = drivers.get("hour_of_day")
+    is_weekend = (time_data or {}).get("is_weekend", drivers.get("is_weekend", False))
+    if hour is not None:
+        h = int(hour)
+        if (7 <= h <= 9) or (17 <= h <= 19):
+            parts.append(
+                f" It is currently rush hour ({h}:00)"
+                + (" on a weekend." if is_weekend else " on a weekday.")
+            )
+        elif h >= 23 or h < 5:
+            parts.append(
+                f" It is late night ({h}:00), when visibility and driver "
+                "alertness are often lower."
+            )
+        elif h >= 22 or h < 7:
+            parts.append(f" It is evening or night ({h}:00).")
+        elif is_weekend:
+            parts.append(f" It is daytime on a weekend ({h}:00).")
+
+    # Weather impact (from request — what actually affected the risk)
+    if weather_data and weather_mult != 1.0:
+        cond = (weather_data.get("condition") or "clear").lower()
+        cond_display = _weather_condition_display_name(cond)
+        pct = int(round((weather_mult - 1.0) * 100))
+        if pct > 0:
+            parts.append(
+                f" Current weather ({cond_display}) increases risk by ~{pct}% "
+                "(research-backed multiplier)."
+            )
+        elif pct < 0:
+            parts.append(
+                f" Current weather ({cond_display}) reduces risk by ~{-pct}%."
+            )
+    elif weather_data:
+        cond = weather_data.get("condition") or "clear"
+        cond_display = _weather_condition_display_name(cond)
+        if cond not in ("clear", "cloudy"):
+            parts.append(f" Current weather: {cond_display}.")
+
+    # Time-of-day impact (from request)
+    if time_data and time_mult != 1.0:
+        pct = int(round((time_mult - 1.0) * 100))
+        if pct > 0:
+            parts.append(
+                f" Time of day adds ~{pct}% to baseline risk (rush hour, night, etc.)."
             )
 
-    parts.append(f" Risk score: {risk_score}/100 (percentile vs. all segments).")
-    return "".join(parts)
+    # Panel weather/temp (fallback when no request weather)
+    if not weather_data:
+        precip = drivers.get("precipitation") or 0
+        try:
+            precip_val = float(precip) if precip is not None else 0
+        except (TypeError, ValueError):
+            precip_val = 0
+        temp = drivers.get("temperature")
+        weather = (drivers.get("weather_condition") or "").lower()
+        if precip_val > 0:
+            parts.append(
+                f" Conditions include precipitation ({precip_val:.1f} mm), "
+                "which increases crash likelihood."
+            )
+        elif temp is not None:
+            try:
+                t = float(temp)
+                if t < 0:
+                    parts.append(
+                        " Conditions are below freezing, which can cause icy roads."
+                    )
+            except (TypeError, ValueError):
+                pass
+        elif weather and weather not in ("clear", "cloudy", ""):
+            cond = _weather_condition_display_name(weather)
+            parts.append(f" Weather: {cond}.")
+
+    # Crash history from panel (recent activity in area)
+    past_24h = drivers.get("past_crash_count_24h") or drivers.get("crashes_1_week_ago")
+    past_7d = drivers.get("past_crash_count_7d")
+    if past_24h is not None and int(past_24h) > 0:
+        parts.append(
+            f" There have been {int(past_24h)} crash(es) in the past 24 hours nearby."
+        )
+    elif past_7d is not None and int(past_7d) > 0:
+        parts.append(
+            f" There have been {int(past_7d)} crash(es) in the past week nearby."
+        )
+
+    # Fallback
+    joined = " ".join(parts).lower()
+    if not any(
+        x in joined
+        for x in ["crash", "rush", "precip", "freez", "weather", "night", "traffic"]
+    ):
+        parts.append(
+            " The prediction uses road type, time of day, traffic volume, "
+            "historical crash patterns, and current conditions."
+        )
+
+    return " ".join(parts)
 
 
 @app.route("/api/health", methods=["GET"])
@@ -657,7 +844,9 @@ def get_risk_predictions():
             seg_id = row.get("segment_id") or row.get("CENTRELINE_ID", row.name)
             nid = _normalize_segment_id(seg_id)
             lam = lam_map.get(nid, 0.0) if nid is not None else 0.0
-            return _lambda_to_risk_label(lam, p70=p70, p90=p90)
+            return _lambda_to_risk_label(
+                lam, p70=p70, p90=p90, lam_values_sorted=lam_sorted
+            )
 
         bbox = box(west, south, east, north)
         segments_in_bbox = road_network[road_network.geometry.intersects(bbox)].copy()
@@ -681,19 +870,33 @@ def get_risk_predictions():
             seg_id = segment.get("segment_id") or segment.get("CENTRELINE_ID", idx)
             nid = _normalize_segment_id(seg_id)
             lam = lam_map.get(nid, 0.0) if nid is not None else 0.0
+            recent_crashes = (
+                int(crash_map.get(nid, 0)) if crash_map and nid is not None else 0
+            )
             confidence = _lambda_to_display_confidence(lam, lam_values_sorted=lam_sorted)
             risk_score = int(round(confidence * 100))
             risk_label, risk_score = _adjust_risk_for_conditions(
-                risk_label, risk_score, weather_mult, time_mult
-            )
-            recent_crashes = (
-                int(crash_map.get(nid, 0)) if crash_map and nid is not None else 0
+                risk_label,
+                risk_score,
+                weather_mult,
+                time_mult,
+                lam=lam,
+                recent_crashes=recent_crashes,
+                segment=segment,
             )
             drivers = _get_risk_driver_features_for_segment(
                 nid if nid is not None else seg_id,
                 panel_slice=panel_slice,
             )
-            risk_explanation = _build_risk_explanation(drivers, risk_label, risk_score)
+            risk_explanation = _build_risk_explanation(
+                drivers, risk_label, risk_score,
+                segment=segment,
+                recent_crashes=recent_crashes,
+                weather_data=weather_data,
+                time_data=time_data,
+                weather_mult=weather_mult,
+                time_mult=time_mult,
+            )
 
             result = {
                 "id": str(seg_id),
@@ -822,20 +1025,36 @@ def get_risk_prediction():
             nid = _normalize_segment_id(seg_id)
             lam = lam_map.get(nid, 0.0) if nid is not None else 0.0
 
-            risk_label = _lambda_to_risk_label(lam, p70=p70, p90=p90)
-            confidence = _lambda_to_display_confidence(lam, lam_values_sorted=lam_sorted)
-            risk_score = int(round(confidence * 100))
-            risk_label, risk_score = _adjust_risk_for_conditions(
-                risk_label, risk_score, weather_mult, time_mult
+            risk_label = _lambda_to_risk_label(
+                lam, p70=p70, p90=p90, lam_values_sorted=lam_sorted
             )
             recent_crashes = (
                 int(crash_map.get(nid, 0)) if crash_map and nid is not None else 0
+            )
+            confidence = _lambda_to_display_confidence(lam, lam_values_sorted=lam_sorted)
+            risk_score = int(round(confidence * 100))
+            risk_label, risk_score = _adjust_risk_for_conditions(
+                risk_label,
+                risk_score,
+                weather_mult,
+                time_mult,
+                lam=lam,
+                recent_crashes=recent_crashes,
+                segment=segment,
             )
             drivers = _get_risk_driver_features_for_segment(
                 nid if nid is not None else seg_id,
                 panel_slice=panel_slice,
             )
-            risk_explanation = _build_risk_explanation(drivers, risk_label, risk_score)
+            risk_explanation = _build_risk_explanation(
+                drivers, risk_label, risk_score,
+                segment=segment,
+                recent_crashes=recent_crashes,
+                weather_data=weather_data,
+                time_data=time_data,
+                weather_mult=weather_mult,
+                time_mult=time_mult,
+            )
 
             if risk_label == "high":
                 probabilities = {"low": 0.1, "medium": 0.1, "high": 0.8}

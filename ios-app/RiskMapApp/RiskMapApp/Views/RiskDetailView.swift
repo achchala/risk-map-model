@@ -15,41 +15,24 @@ struct RiskDetailView: View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    // Header with name and risk score
+                    // Header with name and risk level
                     VStack(alignment: .leading, spacing: 8) {
                         Text(segment.linearName)
                             .font(.title)
                             .fontWeight(.bold)
                         
-                        HStack(alignment: .center, spacing: 16) {
-                            Label(segment.riskLevel.displayName, systemImage: segment.riskLevel.systemImage)
-                                .foregroundColor(Color(hex: segment.riskLevel.color))
-                                .font(.headline)
-                            
-                            // Risk Score (0-100)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Risk Score")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text("\(segment.displayRiskScore)/100")
-                                    .font(.title2)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(Color(hex: segment.riskLevel.color))
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color(hex: segment.riskLevel.color).opacity(0.15))
-                            .cornerRadius(8)
-                        }
+                        Label(segment.riskLevel.displayName, systemImage: segment.riskLevel.systemImage)
+                            .foregroundColor(Color(hex: segment.riskLevel.color))
+                            .font(.headline)
                     }
                     .padding()
                     .background(Color(hex: segment.riskLevel.color).opacity(0.1))
                     .cornerRadius(12)
                     
-                    // Explanation (when user taps into it)
+                    // Explanation
                     if let explanation = segment.riskExplanation, !explanation.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Why This Score?")
+                            Text("Why This Risk Level?")
                                 .font(.headline)
                             
                             Text(explanation)
