@@ -8,6 +8,7 @@ from flask_cors import CORS
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from typing import Optional
 import logging
 import sys
 from shapely.geometry import Point, box
@@ -59,7 +60,7 @@ CORS(app)
 
 # initialize temporal count model (predictive crash likelihood λ)
 TEMPORAL_MODEL_PATH = PROJECT_ROOT / "outputs" / "models" / "toronto_temporal_count_model.pkl"
-temporal_trainer: TemporalCountModelTrainer | None = None
+temporal_trainer: Optional[TemporalCountModelTrainer] = None
 
 try:
     temporal_trainer = TemporalCountModelTrainer()
