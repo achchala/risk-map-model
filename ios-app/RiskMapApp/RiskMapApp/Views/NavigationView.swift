@@ -514,6 +514,7 @@ struct RouteComparisonCard: View {
             .buttonStyle(.plain)
 
             if isExpanded {
+                ScrollView {
                 VStack(spacing: 16) {
                     if routesAreSame {
                         HStack {
@@ -596,6 +597,9 @@ struct RouteComparisonCard: View {
                         }
                     }
                 }
+                .padding(.bottom, 16)
+                }
+                .frame(maxHeight: 380)
             }
         }
         .background(Color(.systemBackground))

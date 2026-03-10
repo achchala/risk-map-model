@@ -14,11 +14,13 @@ class RiskService: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     
-    // backend API URL - update this to your Mac's IP address when testing on device
-    // for iOS Simulator, use localhost. For physical device, use your Mac's IP
+    // backend API URL - Simulator uses localhost; physical device needs your Mac's IP
+    #if targetEnvironment(simulator)
     private let baseURL = "http://localhost:8000/api"
-    // For Simulator: "http://localhost:8000/api"
-    // For Device: "http://10.10.11.47:8000/api" (update IP if needed)
+    #else
+    // Replace with your Mac's IP if it changes (ipconfig getifaddr en0)
+    private let baseURL = "http://10.10.8.221:8000/api"
+    #endif
     
     // fetch risk predictions for region (pass weather for real-time risk adjustment)
     func fetchRiskPredictions(for region: MKCoordinateRegion, weather: WeatherData? = nil) async throws -> [RoadSegment] {
