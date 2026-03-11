@@ -479,6 +479,307 @@ def load_and_clean_data(data_dir: Path):
         raise
 
 
+_TMC_DECADE_FILES = [
+    "tmc_raw_data_2020_2029.csv",
+    "tmc_raw_data_2010_2019.csv",
+]
+_SCHOOL_LOCATIONS_FILE = "School locations-all types data - 4326.csv"
+_TTC_GTFS_DIR = "TTC Routes and Schedules Data"
+
+
+def load_tmc_data(data_dir: Path, min_year: int = 2015) -> Optional[pd.DataFrame]:
+    """
+    Load and aggregate TMC intersection volume data from decade CSV files.
+
+    Reads pedestrian, cyclist, and vehicle counts from 15-minute interval rows.
+    Aggregates to daily totals per intersection then averages across all count dates.
+
+    Returns a DataFrame with one row per intersection:
+        centreline_id, longitude, latitude,
+        tmc_daily_ped_vol, tmc_daily_cyclist_vol, tmc_daily_vehicle_vol
+
+    Returns None if no TMC files are found.
+    """
+    dfs = []
+    for fname in _TMC_DECADE_FILES:
+        fpath = data_dir / fname
+        if fpath.exists():
+            df = pd.read_csv(fpath, low_memory=False)
+            dfs.append(df)
+            logger.info("Loaded TMC file: %s (%d rows)", fname, len(df))
+
+    if not dfs:
+        logger.info("No TMC files found; skipping TMC integration.")
+        return None
+
+    tmc = pd.concat(dfs, ignore_index=True)
+
+    tmc["count_date"] = pd.to_datetime(tmc["count_date"], errors="coerce")
+    tmc = tmc[tmc["count_date"].dt.year >= min_year].copy()
+    logger.info("TMC records after year filter (>=%d): %d", min_year, len(tmc))
+
+    ped_cols = ["n_appr_peds", "s_appr_peds", "e_appr_peds", "w_appr_peds"]
+    bike_cols = ["n_appr_bike", "s_appr_bike", "e_appr_bike", "w_appr_bike"]
+    vehicle_cols = [
+        c for c in tmc.columns
+        if any(x in c for x in ("appr_cars", "appr_truck", "appr_bus"))
+    ]
+
+    tmc["_total_peds"] = tmc[[c for c in ped_cols if c in tmc.columns]].sum(axis=1)
+    tmc["_total_bikes"] = tmc[[c for c in bike_cols if c in tmc.columns]].sum(axis=1)
+    tmc["_total_vehicles"] = tmc[[c for c in vehicle_cols if c in tmc.columns]].sum(axis=1)
+
+    daily = tmc.groupby(["centreline_id", "count_date"]).agg(
+        daily_ped_vol=("_total_peds", "sum"),
+        daily_cyclist_vol=("_total_bikes", "sum"),
+        daily_vehicle_vol=("_total_vehicles", "sum"),
+        longitude=("longitude", "first"),
+        latitude=("latitude", "first"),
+    ).reset_index()
+
+    result = daily.groupby("centreline_id").agg(
+        tmc_daily_ped_vol=("daily_ped_vol", "mean"),
+        tmc_daily_cyclist_vol=("daily_cyclist_vol", "mean"),
+        tmc_daily_vehicle_vol=("daily_vehicle_vol", "mean"),
+        longitude=("longitude", "first"),
+        latitude=("latitude", "first"),
+    ).reset_index()
+
+    logger.info("TMC aggregated: %d unique intersections.", len(result))
+    return result
+
+
+def merge_tmc_into_road_network(
+    road_network: gpd.GeoDataFrame,
+    tmc_data: Optional[pd.DataFrame],
+) -> gpd.GeoDataFrame:
+    """
+    Spatial join TMC intersection volumes to road segments.
+
+    Each road segment gets the TMC volumes from intersections within 50m.
+    If multiple intersections match, takes the max (worst-case exposure).
+    Fills 0 for segments with no nearby intersection.
+    """
+    tmc_cols = ["tmc_daily_ped_vol", "tmc_daily_cyclist_vol", "tmc_daily_vehicle_vol"]
+    if tmc_data is None or len(tmc_data) == 0:
+        for col in tmc_cols:
+            road_network[col] = 0.0
+        return road_network
+
+    tmc_gdf = gpd.GeoDataFrame(
+        tmc_data,
+        geometry=gpd.points_from_xy(tmc_data["longitude"], tmc_data["latitude"]),
+        crs="EPSG:4326",
+    ).to_crs("EPSG:32617")
+    tmc_gdf["geometry"] = tmc_gdf.geometry.buffer(50)
+
+    road_utm = road_network.to_crs("EPSG:32617").copy()
+    road_centroids = gpd.GeoDataFrame(
+        road_utm[["segment_id"]],
+        geometry=road_utm.geometry.centroid,
+        crs="EPSG:32617",
+    )
+
+    joined = gpd.sjoin(
+        road_centroids,
+        tmc_gdf[tmc_cols + ["geometry"]],
+        how="left",
+        predicate="within",
+    )
+    agg = joined.groupby("segment_id").agg(
+        tmc_daily_ped_vol=("tmc_daily_ped_vol", "max"),
+        tmc_daily_cyclist_vol=("tmc_daily_cyclist_vol", "max"),
+        tmc_daily_vehicle_vol=("tmc_daily_vehicle_vol", "max"),
+    ).reset_index()
+
+    road_network = road_network.merge(agg, on="segment_id", how="left")
+    for col in tmc_cols:
+        road_network[col] = road_network[col].fillna(0.0)
+
+    n_covered = (road_network["tmc_daily_ped_vol"] > 0).sum()
+    logger.info(
+        "TMC join: %d/%d segments have non-zero pedestrian volume.",
+        n_covered, len(road_network),
+    )
+    return road_network
+
+
+def load_school_locations(data_dir: Path) -> Optional[gpd.GeoDataFrame]:
+    """
+    Load school point locations from CSV with JSON geometry column.
+
+    Parses the MultiPoint geometry JSON string and returns centroids as
+    a GeoDataFrame in EPSG:4326. Returns None if file not found.
+    """
+    import json
+    from shapely.geometry import shape
+
+    fpath = data_dir / _SCHOOL_LOCATIONS_FILE
+    if not fpath.exists():
+        logger.info("School locations file (%s) not found; skipping.", fpath)
+        return None
+
+    df = pd.read_csv(fpath)
+    logger.info("Loaded %d school records.", len(df))
+
+    def _parse_geom(g: str):
+        try:
+            return shape(json.loads(g)).centroid
+        except Exception:
+            return None
+
+    df["geometry"] = df["geometry"].apply(_parse_geom)
+    df = df.dropna(subset=["geometry"])
+    return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+
+
+def merge_school_zones_into_road_network(
+    road_network: gpd.GeoDataFrame,
+    schools: Optional[gpd.GeoDataFrame],
+    buffer_m: int = 200,
+) -> gpd.GeoDataFrame:
+    """
+    Add is_school_zone binary flag to road segments.
+
+    A segment is marked 1 if its centroid falls within buffer_m meters of any school.
+    """
+    if schools is None or len(schools) == 0:
+        road_network["is_school_zone"] = 0
+        return road_network
+
+    schools_utm = schools.to_crs("EPSG:32617").copy()
+    schools_utm["geometry"] = schools_utm.geometry.buffer(buffer_m)
+
+    road_utm = road_network.to_crs("EPSG:32617").copy()
+    road_centroids = gpd.GeoDataFrame(
+        road_utm[["segment_id"]],
+        geometry=road_utm.geometry.centroid,
+        crs="EPSG:32617",
+    )
+
+    joined = gpd.sjoin(
+        road_centroids,
+        schools_utm[["geometry"]],
+        how="left",
+        predicate="within",
+    )
+    school_segment_ids = set(joined.dropna(subset=["index_right"])["segment_id"].unique())
+    road_network["is_school_zone"] = (
+        road_network["segment_id"].isin(school_segment_ids).astype(int)
+    )
+
+    n_school_segs = int(road_network["is_school_zone"].sum())
+    logger.info(
+        "School zones: %d/%d segments within %dm of a school.",
+        n_school_segs, len(road_network), buffer_m,
+    )
+    return road_network
+
+
+def load_ttc_gtfs(data_dir: Path) -> Optional[pd.DataFrame]:
+    """
+    Load TTC GTFS and compute average trips per hour per stop.
+
+    Reads stops.txt and stop_times.txt. GTFS arrival_time may exceed 24:00
+    for overnight service — handles via modulo.
+
+    Returns a DataFrame with: stop_id, stop_lat, stop_lon, avg_trips_per_hour
+    Returns None if GTFS directory not found.
+    """
+    gtfs_dir = data_dir / _TTC_GTFS_DIR
+    stops_path = gtfs_dir / "stops.txt"
+    stop_times_path = gtfs_dir / "stop_times.txt"
+
+    if not stops_path.exists() or not stop_times_path.exists():
+        logger.info("TTC GTFS files not found at %s; skipping.", gtfs_dir)
+        return None
+
+    stops = pd.read_csv(stops_path)
+    stop_times = pd.read_csv(stop_times_path, usecols=["stop_id", "arrival_time"])
+    logger.info("GTFS: %d stops, %d stop_time rows.", len(stops), len(stop_times))
+
+    def _parse_hour(t: str) -> Optional[int]:
+        try:
+            return int(str(t).split(":")[0]) % 24
+        except Exception:
+            return None
+
+    stop_times["hour_of_day"] = stop_times["arrival_time"].apply(_parse_hour)
+    stop_times = stop_times.dropna(subset=["hour_of_day"])
+
+    trips_by_hour = (
+        stop_times.groupby(["stop_id", "hour_of_day"])
+        .size()
+        .reset_index(name="trip_count")
+    )
+    avg_trips = (
+        trips_by_hour.groupby("stop_id")["trip_count"]
+        .mean()
+        .reset_index(name="avg_trips_per_hour")
+    )
+
+    result = stops[["stop_id", "stop_lat", "stop_lon"]].merge(
+        avg_trips, on="stop_id", how="left"
+    )
+    result["avg_trips_per_hour"] = result["avg_trips_per_hour"].fillna(0.0)
+    logger.info("TTC GTFS: %d stops with frequency computed.", len(result))
+    return result
+
+
+def merge_ttc_into_road_network(
+    road_network: gpd.GeoDataFrame,
+    ttc_stops: Optional[pd.DataFrame],
+    buffer_m: int = 150,
+) -> gpd.GeoDataFrame:
+    """
+    Add nearby_transit_frequency to road segments.
+
+    Each segment gets the sum of avg_trips_per_hour for all TTC stops within
+    buffer_m meters. Represents pedestrian-generating transit activity.
+    """
+    if ttc_stops is None or len(ttc_stops) == 0:
+        road_network["nearby_transit_frequency"] = 0.0
+        return road_network
+
+    ttc_gdf = gpd.GeoDataFrame(
+        ttc_stops,
+        geometry=gpd.points_from_xy(ttc_stops["stop_lon"], ttc_stops["stop_lat"]),
+        crs="EPSG:4326",
+    ).to_crs("EPSG:32617")
+    ttc_gdf["geometry"] = ttc_gdf.geometry.buffer(buffer_m)
+
+    road_utm = road_network.to_crs("EPSG:32617").copy()
+    road_centroids = gpd.GeoDataFrame(
+        road_utm[["segment_id"]],
+        geometry=road_utm.geometry.centroid,
+        crs="EPSG:32617",
+    )
+
+    joined = gpd.sjoin(
+        road_centroids,
+        ttc_gdf[["avg_trips_per_hour", "geometry"]],
+        how="left",
+        predicate="within",
+    )
+    agg = (
+        joined.groupby("segment_id")["avg_trips_per_hour"]
+        .sum()
+        .reset_index(name="nearby_transit_frequency")
+    )
+
+    road_network = road_network.merge(agg, on="segment_id", how="left")
+    road_network["nearby_transit_frequency"] = (
+        road_network["nearby_transit_frequency"].fillna(0.0)
+    )
+
+    n_covered = (road_network["nearby_transit_frequency"] > 0).sum()
+    logger.info(
+        "TTC join: %d/%d segments within %dm of a TTC stop.",
+        n_covered, len(road_network), buffer_m,
+    )
+    return road_network
+
+
 if __name__ == "__main__":
     # Test the data loading
     logging.basicConfig(level=logging.INFO)

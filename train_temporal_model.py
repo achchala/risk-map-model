@@ -26,7 +26,13 @@ from src.data_processing.data_loader import (  # type: ignore
     load_and_clean_data,
     load_historical_weather,
     load_model_dataset,
+    load_school_locations,
+    load_tmc_data,
+    load_ttc_gtfs,
     merge_model_dataset_into_road_network,
+    merge_school_zones_into_road_network,
+    merge_tmc_into_road_network,
+    merge_ttc_into_road_network,
 )
 from src.data_processing.spatial_join_fast import (  # type: ignore
     perform_spatial_join_event_level,
@@ -38,7 +44,7 @@ from src.feature_engineering.panel_builder import (  # type: ignore
     build_weekly_sampled_future_panel,
     temporal_train_val_test_split,
 )
-from src.models.model_trainer import TemporalCountModelTrainer  # type: ignore
+from src.models.model_trainer import HurdleTemporalTrainer, TemporalCountModelTrainer  # type: ignore
 
 
 def _add_tail_weighted_sample_weights(
@@ -198,16 +204,31 @@ def main() -> None:
     # 3b) Load historical weather (city-wide Toronto) if available
     weather_data = load_historical_weather(DATA_DIR)
 
-    # 4) Build temporal configuration for *hourly* predictive horizon.
-    # W = 1 hour, H = 1 hour: model predicts next-hour crash count.
-    panel_config = PanelConfig(window_size_hours=1, horizon_hours=1)
+    # 3c) Merge TMC pedestrian/cyclist/vehicle volumes (intersections within 50m)
+    tmc_data = load_tmc_data(DATA_DIR)
+    road_with_ids = merge_tmc_into_road_network(road_with_ids, tmc_data)
+
+    # 3d) Merge school zone flag (segments within 200m of any school)
+    school_locations = load_school_locations(DATA_DIR)
+    road_with_ids = merge_school_zones_into_road_network(road_with_ids, school_locations)
+
+    # 3e) Merge TTC transit frequency (sum of avg trips/hour for stops within 150m)
+    ttc_stops = load_ttc_gtfs(DATA_DIR)
+    road_with_ids = merge_ttc_into_road_network(road_with_ids, ttc_stops)
+
+    # 4) Build temporal configuration for *daily* predictive horizon.
+    # W = 24 hours, H = 24 hours: model predicts next-day crash count.
+    # Daily windows dramatically reduce zero-inflation vs hourly
+    # (~99.85% zeros hourly → ~5-15% zeros daily) and give Stage 2 of the
+    # hurdle model enough positive examples to train meaningfully.
+    panel_config = PanelConfig(window_size_hours=24, horizon_hours=24)
     logger.info(
         "Building panel dataset with window_size=%dh, horizon=%dh (steps_ahead=%d)...",
         panel_config.window_size_hours,
         panel_config.horizon_hours,
         panel_config.steps_ahead(),
     )
-    # 4a) Build a *sampled* hourly training panel (positives + negatives).
+    # 4a) Build a *sampled* daily training panel (positives + negatives).
     training_panel = build_weekly_sampled_future_panel(
         event_level_crashes=event_level,
         road_network=road_with_ids,
@@ -215,7 +236,7 @@ def main() -> None:
         window_size_hours=panel_config.window_size_hours,
         horizon_hours=panel_config.horizon_hours,
     )
-    logger.info("Hourly training panel shape: %s", training_panel.shape)
+    logger.info("Daily training panel shape: %s", training_panel.shape)
 
     # 4a-QA) Log feature summary so we can verify the model gets real variation.
     _log_panel_feature_summary(training_panel, logger)
@@ -246,12 +267,24 @@ def main() -> None:
         weight_cap=50.0,
     )
 
-    # 6) Train temporal count model using future-looking labels and tail weights
-    logger.info("Training TemporalCountModelTrainer...")
-    trainer = TemporalCountModelTrainer(
-        panel_config=panel_config,
-        lambda_cap=50.0,  # cap λ (crashes per segment-week) for stability and routing
-    )
+    # 6) Train hurdle model using future-looking labels and tail weights.
+    # Stage 1 (binary): P(crash_occurs) — HistGBClassifier on full training set.
+    # Stage 2 (count):  E[crash_count | crash] — HistGBRegressor(Poisson) on
+    #                   positive windows only.  At daily resolution there are
+    #                   enough positive windows for Stage 2 to train meaningfully.
+    USE_HURDLE_MODEL = True
+    if USE_HURDLE_MODEL:
+        logger.info("Training HurdleTemporalTrainer (Stage 1 + Stage 2)...")
+        trainer = HurdleTemporalTrainer(
+            panel_config=panel_config,
+            lambda_cap=50.0,
+        )
+    else:
+        logger.info("Training TemporalCountModelTrainer (single-stage Poisson)...")
+        trainer = TemporalCountModelTrainer(
+            panel_config=panel_config,
+            lambda_cap=50.0,
+        )
     results = trainer.train_temporal_count_model(
         training_panel,
         target_col="future_crash_count",

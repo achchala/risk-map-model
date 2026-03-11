@@ -48,6 +48,7 @@ data/*.shp
 data/*.dbf
 data/*.shx
 data/*.prj
+data/TTC Routes and Schedules Data/
 
 # Model files (if stored elsewhere)
 models/*.pkl

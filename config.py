@@ -1,24 +1,42 @@
 """
 Configuration file for Toronto Road Segment Crash Risk Prediction MVP
 
-This file contains all the parameters, file paths, and settings used throughout the pipeline.
+NOTE: This file is NOT used by the current temporal model pipeline.
+The active pipeline (train_temporal_model.py, evaluate_temporal_model.py,
+src/data_processing/data_loader.py, src/feature_engineering/panel_builder.py)
+builds all paths, features, and model config dynamically at runtime.
+
+This file was written for an earlier prototype (random forest, cross-sectional)
+and is kept for reference only. Do not rely on any values here for the
+production pipeline.
+
+Source of truth for the current pipeline:
+  - Entry points:    train_temporal_model.py, evaluate_temporal_model.py
+  - Feature list:    src/feature_engineering/panel_builder.py (_TRAFFIC_VOLUME_COLS, etc.)
+  - Data loading:    src/data_processing/data_loader.py (SAFE_COLS whitelist)
+  - Model overview:  reports/model_overview.md
 """
 
 from pathlib import Path
 
-# Project paths
+# Project paths — still valid, shared across old and new pipeline
 PROJECT_ROOT = Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 MODELS_DIR = PROJECT_ROOT / "models"
 CACHE_DIR = OUTPUTS_DIR / "cache"
 
-# Data file names
+# Data file names — still valid
 COLLISION_DATA_FILE = "Traffic_Collisions_Open_Data_2437597425626428496.xlsx"
 KSI_DATA_FILE = "TOTAL_KSI_6386614326836635957.csv"
 ROAD_NETWORK_FILE = "Centreline - Version 2 - 4326.geojson"
-MODEL_DATASET_FILE = "model_dataset.csv"  # AADT data by segment_id
+MODEL_DATASET_FILE = "model_dataset.csv"  # AADT/traffic volume data by segment_id
 HISTORICAL_WEATHER_FILE = "historicalweather.csv"
+
+# ---------------------------------------------------------------------------
+# EVERYTHING BELOW THIS LINE IS NOT USED BY THE CURRENT PIPELINE
+# It belongs to the original prototype (random forest, cross-sectional model).
+# ---------------------------------------------------------------------------
 
 # Column mappings for different datasets
 COLLISION_COLUMNS = {
@@ -72,14 +90,15 @@ SEASON_MAPPING = {
 WEATHER_CACHE_PATH = CACHE_DIR / "weather_cache.parquet"
 WEATHER_GRID_SIZE = 0.01  # ~1km grid in degrees
 
-# Risk labeling rules
+# Risk labeling rules (prototype only — not used in temporal model)
 RISK_LABELING_RULES = {
     "high": {"ksi_threshold": 2, "total_crashes_threshold": 10},
     "medium": {"ksi_threshold": 1, "total_crashes_threshold": 5},
     # 'low' is default (everything else)
 }
 
-# Model parameters
+# Model parameters (prototype only — current model uses HistGradientBoostingRegressor
+# configured directly in src/models/model_trainer.py)
 MODEL_CONFIG = {
     "algorithm": "random_forest",
     "n_estimators": 100,
@@ -90,10 +109,11 @@ MODEL_CONFIG = {
     "class_weight": "balanced",
 }
 
-# Cross-validation parameters
+# Cross-validation parameters (prototype only)
 CV_CONFIG = {"n_splits": 5, "random_state": 42, "shuffle": True}
 
-# Feature columns to use for modeling
+# Feature columns (prototype only — current pipeline builds features dynamically
+# in panel_builder.py; this list is ~39 features behind and missing traffic/weather)
 FEATURE_COLUMNS = [
     "num_total_crashes",
     "num_ksi_crashes",
@@ -115,7 +135,7 @@ FEATURE_COLUMNS = [
     "season_fall",
 ]
 
-# Output file names
+# Output file names (prototype only)
 OUTPUT_FILES = {
     "risk_segments": "risk_segments.geojson",
     "model": "risk_model.joblib",

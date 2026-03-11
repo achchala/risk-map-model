@@ -45,6 +45,19 @@ _TRAFFIC_VOLUME_COLS = [
     "log_volume",
 ]
 
+# TMC-derived pedestrian/cyclist/vehicle exposure columns merged from TMC data.
+_TMC_COLS = [
+    "tmc_daily_ped_vol",
+    "tmc_daily_cyclist_vol",
+    "tmc_daily_vehicle_vol",
+]
+
+# School zone and transit frequency columns merged from open data sources.
+_CONTEXTUAL_COLS = [
+    "is_school_zone",
+    "nearby_transit_frequency",
+]
+
 
 @dataclass
 class PanelConfig:
@@ -111,13 +124,64 @@ def _add_temporal_indicators(
     panel["season_int"] = season_str.map(SEASON_INT).fillna(0).astype(int)
 
     if window_size_hours is None or not _is_weekly_or_coarser(window_size_hours):
-        panel["hour_of_day"] = panel["window_start"].dt.hour
-        panel["hour_sin"] = np.sin(2 * np.pi * panel["hour_of_day"] / 24)
-        panel["hour_cos"] = np.cos(2 * np.pi * panel["hour_of_day"] / 24)
+        # day_of_week is meaningful for both daily and sub-daily windows
         panel["day_of_week"] = panel["window_start"].dt.dayofweek
         panel["dow_sin"] = np.sin(2 * np.pi * panel["day_of_week"] / 7)
         panel["dow_cos"] = np.cos(2 * np.pi * panel["day_of_week"] / 7)
         panel["is_weekend"] = panel["day_of_week"].isin([5, 6]).astype(int)
+        if window_size_hours is None or not _is_daily_or_coarser(window_size_hours):
+            # hour_of_day is only meaningful for sub-daily windows
+            # (daily windows are midnight-aligned, so hour=0 for every row — noise not signal)
+            panel["hour_of_day"] = panel["window_start"].dt.hour
+            panel["hour_sin"] = np.sin(2 * np.pi * panel["hour_of_day"] / 24)
+            panel["hour_cos"] = np.cos(2 * np.pi * panel["hour_of_day"] / 24)
+    return panel
+
+
+def _add_contextual_features(panel: pd.DataFrame) -> pd.DataFrame:
+    """
+    Derive contextual interaction features from static road attributes + temporal columns.
+
+    Derives:
+      is_school_active_hour = is_school_zone × is_weekday × (hour in {7, 8, 14, 15})
+
+      Weather × road class / exposure interactions (Step 0.5):
+        snow_x_arterial       = snow_depth_mm × road_class_arterial
+        freeze_x_arterial     = is_freezing × road_class_arterial
+        freeze_x_vehicle_vol  = is_freezing × tmc_daily_vehicle_vol
+        precip_x_ped_vol      = precipitation × tmc_daily_ped_vol
+        freeze_x_transit      = is_freezing × nearby_transit_frequency
+        freeze_x_rush_hour    = is_freezing × is_rush_hour (hours 7,8,17,18)
+
+    All features guard against missing source columns — set to 0 when absent.
+    """
+    panel = panel.copy()
+    if "is_school_zone" in panel.columns and "hour_of_day" in panel.columns:
+        is_weekday = (~panel["window_start"].dt.dayofweek.isin([5, 6])).astype(int)
+        is_peak = panel["hour_of_day"].isin([7, 8, 14, 15]).astype(int)
+        panel["is_school_active_hour"] = panel["is_school_zone"] * is_weekday * is_peak
+    else:
+        panel["is_school_active_hour"] = 0
+
+    # Weather × road class
+    if "snow_depth_mm" in panel.columns and "road_class_arterial" in panel.columns:
+        panel["snow_x_arterial"] = panel["snow_depth_mm"] * panel["road_class_arterial"]
+    if "is_freezing" in panel.columns and "road_class_arterial" in panel.columns:
+        panel["freeze_x_arterial"] = panel["is_freezing"] * panel["road_class_arterial"]
+
+    # Weather × vehicle/pedestrian exposure
+    if "is_freezing" in panel.columns and "tmc_daily_vehicle_vol" in panel.columns:
+        panel["freeze_x_vehicle_vol"] = panel["is_freezing"] * panel["tmc_daily_vehicle_vol"]
+    if "precipitation" in panel.columns and "tmc_daily_ped_vol" in panel.columns:
+        panel["precip_x_ped_vol"] = panel["precipitation"] * panel["tmc_daily_ped_vol"]
+    if "is_freezing" in panel.columns and "nearby_transit_frequency" in panel.columns:
+        panel["freeze_x_transit"] = panel["is_freezing"] * panel["nearby_transit_frequency"]
+
+    # Freezing × rush hour (only meaningful at sub-daily resolution)
+    if "is_freezing" in panel.columns and "hour_of_day" in panel.columns:
+        is_rush = panel["hour_of_day"].isin([7, 8, 17, 18]).astype(int)
+        panel["freeze_x_rush_hour"] = panel["is_freezing"] * is_rush
+
     return panel
 
 
@@ -162,7 +226,7 @@ def _attach_weather_features(
     in that case it simply adds an is_missing_weather flag and returns.
     """
     panel = panel.copy()
-    panel["datetime_hour"] = panel["window_start"].dt.floor("H")
+    panel["datetime_hour"] = panel["window_start"].dt.floor("h")
 
     if weather_data is None or weather_data.empty:
         logger.warning(
@@ -304,6 +368,11 @@ def _is_weekly_or_coarser(window_size_hours: int) -> bool:
     return window_size_hours >= 24 * 6
 
 
+def _is_daily_or_coarser(window_size_hours: int) -> bool:
+    """True when window is daily (24h) up to (but not including) weekly."""
+    return 24 <= window_size_hours < 24 * 6
+
+
 def _compute_lag_features_from_sparse(
     panel: pd.DataFrame,
     crash_counts_sparse: pd.DataFrame,
@@ -337,6 +406,14 @@ def _compute_lag_features_from_sparse(
         ]
         rolling_mean_name = "rolling_mean_4_weeks"
         rolling_max_name = "rolling_max_4_weeks"
+    elif _is_daily_or_coarser(window_size_hours):
+        # Daily-resolution lags: 1d, 7d, 30d with a 7-day rolling window.
+        lag_steps = [1, 7, 30]
+        rolling_window = 7
+        lag_col_names = ["crashes_1d_ago", "crashes_7d_ago", "crashes_30d_ago"]
+        rolling_mean_name = "rolling_mean_7d"
+        rolling_max_name = "rolling_max_7d"
+        lag_steps_to_compute = sorted(set(range(1, rolling_window + 1)) | set(lag_steps))
     else:
         # Finer windows: hour-based. Use 24h rolling (not 30d) to avoid OOM.
         steps_24h = max(1, int(round(24 / window_size_hours)))
@@ -451,13 +528,13 @@ def build_panel_dataset(
         raise ValueError(f"event_level_crashes missing required columns: {missing}")
 
     # 1. Create time windows covering the full range of events
-    min_ts = event_level_crashes["event_datetime"].min().floor("H")
-    max_ts = event_level_crashes["event_datetime"].max().ceil("H")
+    min_ts = event_level_crashes["event_datetime"].min().floor("h")
+    max_ts = event_level_crashes["event_datetime"].max().ceil("h")
 
     window_starts = pd.date_range(
         min_ts,
         max_ts,
-        freq=f"{config.window_size_hours}H",
+        freq=f"{config.window_size_hours}h",
     )
 
     logger.info(
@@ -474,7 +551,7 @@ def build_panel_dataset(
         "segment_id",
         pd.Grouper(
             key="event_datetime",
-            freq=f"{config.window_size_hours}H",
+            freq=f"{config.window_size_hours}h",
             label="left",
             origin=min_ts,
         ),
@@ -514,9 +591,9 @@ def build_panel_dataset(
         "segment_id", "segment_length", "ROAD_CLASS",
         "is_oneway", "from_intersection_degree", "to_intersection_degree",
     ]
-    for adt_col in _TRAFFIC_VOLUME_COLS:
-        if adt_col in road_network.columns:
-            static_cols.append(adt_col)
+    for col in _TRAFFIC_VOLUME_COLS + _TMC_COLS + _CONTEXTUAL_COLS:
+        if col in road_network.columns:
+            static_cols.append(col)
     available = [c for c in static_cols if c in road_network.columns]
     static = road_network[available].drop_duplicates("segment_id")
     static = _encode_road_class_onehot(static, road_network)
@@ -525,9 +602,10 @@ def build_panel_dataset(
     panel = panel.merge(static, on="segment_id", how="left")
     panel = panel.merge(centroids, on="segment_id", how="left")
 
-    # 5. Temporal indicators
+    # 5. Temporal indicators + contextual interaction features
     panel["window_start"] = pd.to_datetime(panel["window_start"])
     panel = _add_temporal_indicators(panel, config.window_size_hours)
+    panel = _add_contextual_features(panel)
 
     # 6. Optional weather features
     panel = _attach_weather_features(panel, weather_data=weather_data)
@@ -544,6 +622,14 @@ def build_panel_dataset(
         rolling_window = 4
         rolling_mean_name = "rolling_mean_4_weeks"
         rolling_max_name = "rolling_max_4_weeks"
+    elif _is_daily_or_coarser(config.window_size_hours):
+        # Daily lags: 1d, 7d, 30d with 7-day rolling window
+        panel["crashes_1d_ago"] = panel.groupby("segment_id")["crash_count"].shift(1)
+        panel["crashes_7d_ago"] = panel.groupby("segment_id")["crash_count"].shift(7)
+        panel["crashes_30d_ago"] = panel.groupby("segment_id")["crash_count"].shift(30)
+        rolling_window = 7
+        rolling_mean_name = "rolling_mean_7d"
+        rolling_max_name = "rolling_max_7d"
     else:
         steps_24h = max(1, int(round(24 / config.window_size_hours)))
         steps_7d = max(1, int(round((24 * 7) / config.window_size_hours)))
@@ -633,7 +719,7 @@ def build_weekly_sampled_future_panel(
         horizon_hours,
     )
 
-    min_event_ts = event_level_crashes["event_datetime"].min().floor("H")
+    min_event_ts = event_level_crashes["event_datetime"].min().floor("h")
 
     # Step 1: Sparse crash counts per (segment_id, window_start)
     # origin=min_event_ts keeps bin edges consistent with build_panel_dataset.
@@ -643,7 +729,7 @@ def build_weekly_sampled_future_panel(
                 "segment_id",
                 pd.Grouper(
                     key="event_datetime",
-                    freq=f"{window_size_hours}H",
+                    freq=f"{window_size_hours}h",
                     label="left",
                     origin=min_event_ts,
                 ),
@@ -673,7 +759,7 @@ def build_weekly_sampled_future_panel(
     all_windows = pd.date_range(
         min_ws,
         max_ws,
-        freq=f"{window_size_hours}H",
+        freq=f"{window_size_hours}h",
     )
 
     # Active segments only (those that appear in the event-level data)
@@ -733,9 +819,9 @@ def build_weekly_sampled_future_panel(
         "segment_id", "segment_length", "ROAD_CLASS",
         "is_oneway", "from_intersection_degree", "to_intersection_degree",
     ]
-    for adt_col in _TRAFFIC_VOLUME_COLS:
-        if adt_col in road_network.columns:
-            static_cols.append(adt_col)
+    for col in _TRAFFIC_VOLUME_COLS + _TMC_COLS + _CONTEXTUAL_COLS:
+        if col in road_network.columns:
+            static_cols.append(col)
     available = [c for c in static_cols if c in road_network.columns]
     static = road_network[available].drop_duplicates("segment_id")
     static = _encode_road_class_onehot(static, road_network)
@@ -746,6 +832,7 @@ def build_weekly_sampled_future_panel(
 
     panel["window_start"] = pd.to_datetime(panel["window_start"])
     panel = _add_temporal_indicators(panel, window_size_hours)
+    panel = _add_contextual_features(panel)
     panel = _attach_weather_features(panel, weather_data=weather_data)
 
     # Step 3b: Lag and rolling features from sparse crash history
@@ -757,7 +844,7 @@ def build_weekly_sampled_future_panel(
     panel = _compute_historical_crash_profiles(panel, event_level_crashes)
 
     # Step 4: Define future label via join on (segment_id, future_window_start)
-    horizon_delta = pd.to_timedelta(horizon_hours, unit="H")
+    horizon_delta = pd.to_timedelta(horizon_hours, unit="h")
     panel["future_window_start"] = panel["window_start"] + horizon_delta
 
     future_counts = crash_counts.rename(
@@ -847,7 +934,7 @@ def build_latest_window_inference_panel(
     if config is None:
         config = PanelConfig(window_size_hours=window_size_hours, horizon_hours=window_size_hours)
 
-    min_event_ts = event_level_crashes["event_datetime"].min().floor("H")
+    min_event_ts = event_level_crashes["event_datetime"].min().floor("h")
 
     crash_counts = (
         event_level_crashes.groupby(
@@ -855,7 +942,7 @@ def build_latest_window_inference_panel(
                 "segment_id",
                 pd.Grouper(
                     key="event_datetime",
-                    freq=f"{config.window_size_hours}H",
+                    freq=f"{config.window_size_hours}h",
                     label="left",
                     origin=min_event_ts,
                 ),
@@ -882,7 +969,7 @@ def build_latest_window_inference_panel(
 
     static_cols = ["segment_id", "segment_length", "ROAD_CLASS",
                     "is_oneway", "from_intersection_degree", "to_intersection_degree"]
-    for c in _TRAFFIC_VOLUME_COLS:
+    for c in _TRAFFIC_VOLUME_COLS + _TMC_COLS + _CONTEXTUAL_COLS:
         if c in road_network.columns:
             static_cols.append(c)
     available = [c for c in static_cols if c in road_network.columns]
@@ -894,6 +981,7 @@ def build_latest_window_inference_panel(
     panel = panel.merge(centroids, on="segment_id", how="left")
     panel["window_start"] = pd.to_datetime(panel["window_start"])
     panel = _add_temporal_indicators(panel, config.window_size_hours)
+    panel = _add_contextual_features(panel)
     panel = _attach_weather_features(panel, weather_data=weather_data)
     panel = _compute_lag_features_from_sparse(
         panel, crash_counts, config.window_size_hours
