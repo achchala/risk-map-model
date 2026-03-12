@@ -7,12 +7,20 @@ from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 import numpy as np
 import pandas as pd
+from sklearn.inspection import permutation_importance
+from sklearn.metrics import mean_absolute_error
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import logging
 import sys
 from datetime import datetime
 from shapely.geometry import Point, box
+
+# Optional SHAP (used for local attributions). Kept optional so API can still boot without it.
+try:
+    import shap  # type: ignore
+except Exception:  # pragma: no cover
+    shap = None
 
 # import existing modules
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -690,7 +698,20 @@ def _build_risk_explanation(
     elif weather_data:
         cond = weather_data.get("condition") or "clear"
         cond_display = _weather_condition_display_name(cond)
-        if cond not in ("clear", "cloudy"):
+        temp = weather_data.get("temperature")
+        added_freezing = False
+        if temp is not None:
+            try:
+                t = float(temp)
+                if t < 0:
+                    parts.append(
+                        " Conditions are below freezing (%.0f°C), which can cause icy roads."
+                        % t
+                    )
+                    added_freezing = True
+            except (TypeError, ValueError):
+                pass
+        if not added_freezing and cond not in ("clear", "cloudy"):
             parts.append(f" Current weather: {cond_display}.")
 
     # Time-of-day impact (from request)
@@ -898,6 +919,14 @@ def get_risk_predictions():
                 time_mult=time_mult,
             )
 
+            # Probabilities derived from risk_label (same as single-point API)
+            if risk_label == "high":
+                probabilities = {"low": 0.1, "medium": 0.1, "high": 0.8}
+            elif risk_label == "medium":
+                probabilities = {"low": 0.2, "medium": 0.7, "high": 0.1}
+            else:
+                probabilities = {"low": 0.8, "medium": 0.15, "high": 0.05}
+
             result = {
                 "id": str(seg_id),
                 "LINEAR_NAME": segment.get("LINEAR_NAME", "Unknown"),
@@ -907,6 +936,9 @@ def get_risk_predictions():
                 "risk_score": risk_score,
                 "confidence": confidence,
                 "risk_explanation": risk_explanation,
+                "probabilities": probabilities,
+                "weather_mult": round(weather_mult, 2),
+                "time_mult": round(time_mult, 2),
                 "num_total_crashes": recent_crashes,
                 "num_ksi_crashes": int(segment.get("num_ksi_crashes", 0)),
                 "fatality_count": int(segment.get("fatality_count", 0)),
@@ -1585,6 +1617,187 @@ def get_model_features():
 
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+class _ScaledTemporalModel:
+    """
+    Wrapper so permutation importance / SHAP see (scaler + model) as one estimator.
+    """
+
+    def __init__(self, trainer: TemporalCountModelTrainer):
+        self.trainer = trainer
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        X_scaled = self.trainer.scaler.transform(X)
+        return self.trainer.model.predict(X_scaled)  # type: ignore[union-attr]
+
+
+def _get_panel_for_importance(sample_size: int = 5000) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Return (X, y) for global importance from the training panel.
+    Uses a deterministic tail sample to reflect newer distribution.
+    """
+    if panel_data is None or panel_data.empty:
+        raise RuntimeError("Panel data not loaded")
+    if temporal_trainer is None or temporal_trainer.model is None:
+        raise RuntimeError("Temporal model not loaded")
+
+    df = panel_data.copy()
+    if "window_start" in df.columns:
+        df = df.sort_values("window_start")
+    if len(df) > sample_size:
+        df = df.tail(sample_size)
+
+    X, y = temporal_trainer.prepare_panel_features(df)  # type: ignore[arg-type]
+    return X, y
+
+
+@app.route("/api/attribution/global", methods=["GET"])
+def attribution_global():
+    """
+    Global feature importance via permutation importance on a sample of the panel.
+
+    Query params:
+      - n: sample size (default 5000, capped 20000)
+      - repeats: repeats per feature (default 5, capped 20)
+      - top_k: number of features returned (default 30, capped 200)
+    """
+    if temporal_trainer is None or temporal_trainer.model is None:
+        return jsonify({"error": "Temporal model not loaded"}), 500
+    try:
+        n = int(request.args.get("n", 5000))
+        repeats = int(request.args.get("repeats", 5))
+        top_k = int(request.args.get("top_k", 30))
+        n = max(200, min(n, 20000))
+        repeats = max(1, min(repeats, 20))
+        top_k = max(5, min(top_k, 200))
+
+        X, y = _get_panel_for_importance(sample_size=n)
+        estimator = _ScaledTemporalModel(temporal_trainer)
+
+        # MAE scorer (negative because higher is better for permutation_importance)
+        def _score(est, Xp, yp):
+            pred = est.predict(Xp)
+            pred = np.clip(pred, 0.0, None)
+            return -float(mean_absolute_error(yp, pred))
+
+        result = permutation_importance(
+            estimator,
+            X,
+            y,
+            scoring=_score,
+            n_repeats=repeats,
+            random_state=42,
+            n_jobs=1,
+        )
+
+        pairs = [
+            {
+                "feature": f,
+                "importance": float(imp),
+                "stdev": float(st),
+            }
+            for f, imp, st in zip(
+                X.columns.tolist(),
+                result.importances_mean.tolist(),
+                result.importances_std.tolist(),
+            )
+        ]
+        pairs.sort(key=lambda d: d["importance"], reverse=True)
+        return jsonify(
+            {
+                "method": "permutation_importance",
+                "metric": "neg_mae",
+                "n_samples": int(len(X)),
+                "n_features": int(X.shape[1]),
+                "n_repeats": repeats,
+                "top_k": top_k,
+                "importances": pairs[:top_k],
+            }
+        )
+    except Exception as e:
+        import traceback
+
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@app.route("/api/attribution/segment", methods=["GET"])
+def attribution_segment():
+    """
+    Local feature contributions for a segment at a given as_of timestamp using SHAP.
+
+    Query params:
+      - segment_id (required)
+      - as_of (optional): ISO datetime
+      - top_k (optional): number of features returned (default 20)
+    """
+    if temporal_trainer is None or temporal_trainer.model is None:
+        return jsonify({"error": "Temporal model not loaded"}), 500
+    if shap is None:
+        return jsonify({"error": "SHAP not installed on backend"}), 500
+
+    try:
+        seg_id = request.args.get("segment_id")
+        if not seg_id:
+            return jsonify({"error": "segment_id is required"}), 400
+        as_of = request.args.get("as_of")
+        top_k = int(request.args.get("top_k", 20))
+        top_k = max(5, min(top_k, 200))
+
+        lam_result = _get_or_compute_lambda_map(as_of)
+        if lam_result is None:
+            return jsonify({"error": "Could not compute risk for as_of"}), 500
+        panel_slice = lam_result.get("panel_slice")
+        if panel_slice is None or panel_slice.empty:
+            return jsonify({"error": "Panel slice not available for as_of"}), 500
+
+        s = str(seg_id)
+        match = panel_slice[panel_slice["segment_id"].astype(str) == s]
+        if match.empty:
+            return jsonify({"error": f"segment_id {seg_id} not found"}), 404
+
+        row = match.iloc[[0]].copy()
+        X_row, _ = temporal_trainer.prepare_panel_features(row)  # type: ignore[arg-type]
+        estimator = _ScaledTemporalModel(temporal_trainer)
+
+        bg = panel_slice.sample(n=min(200, len(panel_slice)), random_state=42)
+        X_bg, _ = temporal_trainer.prepare_panel_features(bg)  # type: ignore[arg-type]
+
+        explainer = shap.Explainer(estimator.predict, X_bg)
+        shap_values = explainer(X_row)
+
+        values = np.array(shap_values.values).reshape(1, -1)[0]
+        base_value = float(np.array(shap_values.base_values).reshape(-1)[0])
+        pred = float(estimator.predict(X_row)[0])
+
+        contributions = []
+        for feat, feat_val, sv in zip(
+            X_row.columns.tolist(), X_row.iloc[0].tolist(), values.tolist()
+        ):
+            contributions.append(
+                {
+                    "feature": feat,
+                    "value": float(feat_val),
+                    "contribution": float(sv),
+                }
+            )
+        contributions.sort(key=lambda d: abs(d["contribution"]), reverse=True)
+
+        return jsonify(
+            {
+                "method": "shap",
+                "segment_id": s,
+                "as_of": as_of,
+                "prediction_lambda_window": pred,
+                "base_value": base_value,
+                "top_k": top_k,
+                "contributions": contributions[:top_k],
+            }
+        )
+    except Exception as e:
+        import traceback
+
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 @app.route("/api/data-verification", methods=["GET"])

@@ -24,6 +24,8 @@ struct RouteNavigationView: View {
     let weatherService: WeatherService
     @StateObject private var routeService: RouteService
     @StateObject private var locationManager = LocationManager()
+    @AppStorage("mapStyle") private var mapStyleRaw = "standard"
+    @AppStorage("defaultRoutePreference") private var defaultRoutePreference = "safest"
 
     @State private var startPoint: String = ""
     @State private var destination: String = ""
@@ -44,6 +46,14 @@ struct RouteNavigationView: View {
         self.riskService = riskService
         self.weatherService = weatherService
         _routeService = StateObject(wrappedValue: RouteService(riskService: riskService, weatherService: weatherService))
+    }
+
+    private var navMapStyle: MapStyle {
+        switch mapStyleRaw {
+        case "satellite": return .imagery
+        case "hybrid": return .hybrid
+        default: return .standard
+        }
     }
 
     var body: some View {
@@ -163,7 +173,7 @@ struct RouteNavigationView: View {
             mapAnnotations
             mapRoutes
         }
-        .mapStyle(.standard)
+        .mapStyle(navMapStyle)
         .mapControls {
             MapUserLocationButton()
             MapCompass()
@@ -373,7 +383,7 @@ struct RouteNavigationView: View {
             await MainActor.run {
                 if routeService.saferRoute != nil && routeService.optimalRoute != nil {
                     showRouteComparison = true
-                    selectedRoute = routeService.saferRoute
+                    selectedRoute = defaultRoutePreference == "fastest" ? routeService.optimalRoute : routeService.saferRoute
                     updateCameraForRoutes()
                 }
             }
@@ -636,6 +646,7 @@ struct RouteOptionCard: View {
     let color: Color
     let isSelected: Bool
     let onTap: () -> Void
+    @AppStorage("distanceUnits") private var distanceUnits = "km"
 
     var body: some View {
         Button(action: onTap) {
@@ -649,7 +660,7 @@ struct RouteOptionCard: View {
                     Text(subtitle).font(.caption).foregroundColor(.secondary)
                     HStack(spacing: 16) {
                         Label(formatTime(route.estimatedTime), systemImage: "clock")
-                        Label(formatDistance(route.distance), systemImage: "ruler")
+                        Label(formatDistance(route.distance, units: distanceUnits), systemImage: "ruler")
                     }
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -682,7 +693,11 @@ struct RouteOptionCard: View {
         return minutes < 60 ? "\(minutes) min" : "\(minutes / 60)h \(minutes % 60)m"
     }
 
-    private func formatDistance(_ meters: CLLocationDistance) -> String {
+    private func formatDistance(_ meters: CLLocationDistance, units: String = "km") -> String {
+        if units == "mi" {
+            let miles = meters / 1609.34
+            return miles < 1 ? String(format: "%.0f ft", meters * 3.28084) : String(format: "%.1f mi", miles)
+        }
         return meters < 1000 ? String(format: "%.0f m", meters) : String(format: "%.1f km", meters / 1000)
     }
 }

@@ -11,6 +11,8 @@ import MapKit
 struct MapView: View {
     @EnvironmentObject var riskService: RiskService
     @EnvironmentObject var weatherService: WeatherService
+    @AppStorage("autoRefresh") private var autoRefresh = true
+    @AppStorage("mapStyle") private var mapStyleRaw = "standard"
     @State private var cameraPosition = MapCameraPosition.region(
         MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: 43.6532, longitude: -79.3832), // Toronto
@@ -23,7 +25,15 @@ struct MapView: View {
     )
     @State private var selectedSegment: RoadSegment?
     @State private var showDetail = false
-    
+
+    private var riskMapStyle: MapStyle {
+        switch mapStyleRaw {
+        case "satellite": return .imagery
+        case "hybrid": return .hybrid
+        default: return .standard
+        }
+    }
+
     var body: some View {
         ZStack {
             Map(position: $cameraPosition, interactionModes: [.pan, .zoom, .rotate, .pitch]) {
@@ -39,7 +49,7 @@ struct MapView: View {
                     }
                 }
             }
-            .mapStyle(.standard)
+            .mapStyle(riskMapStyle)
             .mapControls {
                 MapUserLocationButton()
                 MapCompass()
@@ -49,9 +59,10 @@ struct MapView: View {
                 loadRiskData()
             }
             .onMapCameraChange(frequency: .onEnd) { context in
-                // load data when map region changes
                 currentRegion = context.region
-                loadRiskDataForRegion(context.region)
+                if autoRefresh {
+                    loadRiskDataForRegion(context.region)
+                }
             }
             
             // loading indicator

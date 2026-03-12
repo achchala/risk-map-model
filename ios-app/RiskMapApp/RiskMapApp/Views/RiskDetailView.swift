@@ -30,19 +30,62 @@ struct RiskDetailView: View {
                     .cornerRadius(12)
                     
                     // Explanation
-                    if let explanation = segment.riskExplanation, !explanation.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Why This Risk Level?")
-                                .font(.headline)
-                            
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Why This Risk Level?")
+                            .font(.headline)
+
+                        // Metrics row: confidence
+                        if segment.confidence > 0 {
+                            Label("\(Int(segment.confidence * 100))% confidence", systemImage: "checkmark.seal")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+
+                        // Weather/time multipliers when they affect risk
+                        if let wm = segment.weatherMult, let tm = segment.timeMult, (wm != 1.0 || tm != 1.0) {
+                            HStack(spacing: 12) {
+                                if wm != 1.0 {
+                                    Text("Weather: \(wm > 1 ? "+" : "")\(Int(round((wm - 1) * 100)))%")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                if tm != 1.0 {
+                                    Text("Time of day: \(tm > 1 ? "+" : "")\(Int(round((tm - 1) * 100)))%")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+
+                        // Probability breakdown
+                        if let probs = segment.probabilities {
+                            HStack(spacing: 12) {
+                                Text("Probabilities:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text("Low \(Int(probs.low * 100))%")
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                                Text("Medium \(Int(probs.medium * 100))%")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                                Text("High \(Int(probs.high * 100))%")
+                                    .font(.caption)
+                                    .foregroundColor(.red)
+                            }
+                            .padding(.vertical, 4)
+                        }
+
+                        if let explanation = segment.riskExplanation, !explanation.isEmpty {
                             Text(explanation)
                                 .font(.body)
                                 .foregroundColor(.secondary)
                         }
-                        .padding()
-                        .background(Color(.systemGray6))
-                        .cornerRadius(12)
                     }
+                    .padding()
+                    .background(Color(.systemGray6))
+                    .cornerRadius(12)
                     
                     // Road information
                     VStack(alignment: .leading, spacing: 12) {

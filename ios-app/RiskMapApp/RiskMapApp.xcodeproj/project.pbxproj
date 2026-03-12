@@ -15,8 +15,12 @@
 		A1000011 /* RiskDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000012 /* RiskDetailView.swift */; };
 		A1000013 /* RiskListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000014 /* RiskListView.swift */; };
 		A1000015 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000016 /* SettingsView.swift */; };
-		A1000043 /* NavigationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000044 /* NavigationView.swift */; };
 		A1000017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000018 /* Assets.xcassets */; };
+		A1000043 /* NavigationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000044 /* NavigationView.swift */; };
+		A1000045 /* AddressAutocompleteField.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000046 /* AddressAutocompleteField.swift */; };
+		A1000047 /* WeatherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000048 /* WeatherService.swift */; };
+		A1000049 /* RouteService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000050 /* RouteService.swift */; };
+		A1000051 /* LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000052 /* LocationManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,9 +33,13 @@
 		A1000012 /* RiskDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RiskDetailView.swift; sourceTree = "<group>"; };
 		A1000014 /* RiskListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RiskListView.swift; sourceTree = "<group>"; };
 		A1000016 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		A1000044 /* NavigationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationView.swift; sourceTree = "<group>"; };
 		A1000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000019 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A1000044 /* NavigationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationView.swift; sourceTree = "<group>"; };
+		A1000046 /* AddressAutocompleteField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressAutocompleteField.swift; sourceTree = "<group>"; };
+		A1000048 /* WeatherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherService.swift; sourceTree = "<group>"; };
+		A1000050 /* RouteService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteService.swift; sourceTree = "<group>"; };
+		A1000052 /* LocationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -87,6 +95,9 @@
 			isa = PBXGroup;
 			children = (
 				A1000008 /* RiskService.swift */,
+				A1000048 /* WeatherService.swift */,
+				A1000050 /* RouteService.swift */,
+				A1000052 /* LocationManager.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -94,6 +105,7 @@
 		A1000026 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				A1000046 /* AddressAutocompleteField.swift */,
 				A1000010 /* MapView.swift */,
 				A1000044 /* NavigationView.swift */,
 				A1000012 /* RiskDetailView.swift */,
@@ -176,8 +188,12 @@
 				A1000003 /* ContentView.swift in Sources */,
 				A1000005 /* RiskModels.swift in Sources */,
 				A1000007 /* RiskService.swift in Sources */,
+				A1000047 /* WeatherService.swift in Sources */,
+				A1000049 /* RouteService.swift in Sources */,
+				A1000051 /* LocationManager.swift in Sources */,
 				A1000009 /* MapView.swift in Sources */,
 				A1000043 /* NavigationView.swift in Sources */,
+				A1000045 /* AddressAutocompleteField.swift in Sources */,
 				A1000011 /* RiskDetailView.swift in Sources */,
 				A1000013 /* RiskListView.swift in Sources */,
 				A1000015 /* SettingsView.swift in Sources */,
@@ -203,7 +219,6 @@
 				CLANG_WARN_BOOL_CONVERSION = YES;
 				CLANG_WARN_COMMA = YES;
 				CLANG_WARN_CONSTANT_CONVERSION = YES;
-			ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
 				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
 				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
@@ -315,7 +330,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = U4ZH856V33;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RiskMapApp/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -343,7 +358,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = U4ZH856V33;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RiskMapApp/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -389,9 +404,3 @@
 	};
 	rootObject = A1000031 /* Project object */;
 }
-
-
-
-
-
-

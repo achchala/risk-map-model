@@ -8,17 +8,34 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @AppStorage("notificationsEnabled") private var notificationsEnabled = false
     @AppStorage("autoRefresh") private var autoRefresh = true
-    
+    @AppStorage("mapStyle") private var mapStyleRaw = "standard"
+    @AppStorage("defaultRoutePreference") private var defaultRoutePreference = "safest"
+    @AppStorage("distanceUnits") private var distanceUnits = "km"
+
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("Preferences")) {
-                    Toggle("Enable Notifications", isOn: $notificationsEnabled)
-                    Toggle("Auto Refresh Map", isOn: $autoRefresh)
+                Section(header: Text("Map")) {
+                    Toggle("Auto Refresh on Pan/Zoom", isOn: $autoRefresh)
+                    Picker("Map Style", selection: $mapStyleRaw) {
+                        Text("Standard").tag("standard")
+                        Text("Satellite").tag("satellite")
+                        Text("Hybrid").tag("hybrid")
+                    }
                 }
-                
+
+                Section(header: Text("Navigation")) {
+                    Picker("Default Route", selection: $defaultRoutePreference) {
+                        Text("Safest").tag("safest")
+                        Text("Fastest").tag("fastest")
+                    }
+                    Picker("Distance Units", selection: $distanceUnits) {
+                        Text("Kilometers").tag("km")
+                        Text("Miles").tag("mi")
+                    }
+                }
+
                 Section(header: Text("About")) {
                     HStack {
                         Text("Version")
@@ -26,23 +43,19 @@ struct SettingsView: View {
                         Text("1.0.0")
                             .foregroundColor(.secondary)
                     }
-                    
-                    Link("Privacy Policy", destination: URL(string: "https://your-domain.com/privacy")!)
-                    Link("Terms of Service", destination: URL(string: "https://your-domain.com/terms")!)
                 }
-                
-                Section(header: Text("Data Source")) {
-                    Text("Crash data provided by Toronto Police Open Data")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    Text("Road network data from Toronto Open Data Portal")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+
+                Section(header: Text("Data Sources")) {
+                    LabeledContent("Crash Data", value: "Toronto Police Open Data")
+                    LabeledContent("KSI (Severe Crashes)", value: "Toronto Police Open Data")
+                    LabeledContent("Road Network", value: "Toronto Open Data")
+                    LabeledContent("Live Weather", value: "WeatherAPI.com")
+                    LabeledContent("Historical Weather", value: "NOAA Climate Data")
+                    LabeledContent("Routing & Maps", value: "Apple MapKit")
                 }
-                
+
                 Section(header: Text("Disclaimer")) {
-                    Text("Risk predictions are based on historical data and should not be the sole factor in route planning. Always exercise caution while driving.")
+                    Text("Risk predictions use historical crash data and should not be the sole factor in route planning. Always drive safely.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

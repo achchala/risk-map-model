@@ -54,16 +54,25 @@ struct RoadSegment: Identifiable, Codable {
     let numKSICrashes: Int
     let fatalityCount: Int
     let coordinates: [Coordinate]
-    
+    let probabilities: RiskProbabilities?
+    let weatherMult: Double?
+    let timeMult: Double?
+
     struct Coordinate: Codable {
         let latitude: Double
         let longitude: Double
     }
-    
+
+    struct RiskProbabilities: Codable {
+        let low: Double
+        let medium: Double
+        let high: Double
+    }
+
     var displayRiskScore: Int {
         riskScore ?? Int(confidence * 100)
     }
-    
+
     enum CodingKeys: String, CodingKey {
         case id
         case linearName = "LINEAR_NAME"
@@ -77,6 +86,9 @@ struct RoadSegment: Identifiable, Codable {
         case numKSICrashes = "num_ksi_crashes"
         case fatalityCount = "fatality_count"
         case coordinates
+        case probabilities
+        case weatherMult = "weather_mult"
+        case timeMult = "time_mult"
     }
 }
 

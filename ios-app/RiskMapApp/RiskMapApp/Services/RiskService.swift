@@ -55,6 +55,7 @@ class RiskService: ObservableObject {
 
             if let weather = weather {
                 var weatherDict: [String: Any] = ["condition": weather.condition.rawValue]
+                weatherDict["temperature"] = weather.temperature
                 if let v = weather.visibility { weatherDict["visibility"] = v }
                 if let p = weather.precipitation { weatherDict["precipitation"] = p }
                 requestBody["weather"] = weatherDict
@@ -133,6 +134,7 @@ class RiskService: ObservableObject {
         ]
         if let weather = weather {
             var w: [String: Any] = ["condition": weather.condition.rawValue]
+            w["temperature"] = weather.temperature
             if let v = weather.visibility { w["visibility"] = v }
             if let p = weather.precipitation { w["precipitation"] = p }
             requestBody["weather"] = w
