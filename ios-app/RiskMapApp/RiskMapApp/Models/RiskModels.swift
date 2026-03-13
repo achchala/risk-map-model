@@ -217,12 +217,14 @@ struct Route: Identifiable {
         self._steps = mkRoute.steps
     }
 
-    /// Create Route from backend safety-aware API response (produces genuinely different fastest vs safer)
-    init(routeOption: RouteOption, routeType: RouteType) {
+    /// Create Route from backend safety-aware API response (produces genuinely different fastest vs safer).
+    /// - Parameter estimatedTimeOverride: When provided (e.g. from MapKit's effective speed), overrides backend's optimistic free-flow estimate.
+    init(routeOption: RouteOption, routeType: RouteType, estimatedTimeOverride: TimeInterval? = nil) {
         let coords = routeOption.fullRouteCoordinates
         self.polyline = MKPolyline(coordinates: coords, count: coords.count)
-        self.estimatedTime = routeOption.summary.totalTravelTimeHours * 3600
         self.distance = Self.computeDistance(coords: coords)
+        let backendTime = routeOption.summary.totalTravelTimeHours * 3600
+        self.estimatedTime = estimatedTimeOverride ?? backendTime
         let high = routeOption.summary.highRiskSegments ?? 0
         let med = routeOption.summary.mediumRiskSegments ?? 0
         let low = routeOption.summary.lowRiskSegments ?? 0
@@ -236,6 +238,10 @@ struct Route: Identifiable {
     }
 
     private static func computeDistance(coords: [CLLocationCoordinate2D]) -> CLLocationDistance {
+        computeDistanceStatic(coords: coords)
+    }
+
+    static func computeDistanceStatic(coords: [CLLocationCoordinate2D]) -> CLLocationDistance {
         guard coords.count >= 2 else { return 0 }
         var total: CLLocationDistance = 0
         for i in 0..<coords.count - 1 {

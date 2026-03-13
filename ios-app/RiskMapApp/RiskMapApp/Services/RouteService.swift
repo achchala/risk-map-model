@@ -31,32 +31,26 @@ class RouteService: ObservableObject {
         }
 
         do {
-            // Prefer backend safety-aware routing: produces genuinely different fastest vs safer routes
-            // (graph-based Dijkstra with risk-weighted edges). Falls back to MapKit when outside Toronto.
-            if let backendRoutes = try? await fetchBackendRoutes(from: start, to: destination) {
-                await MainActor.run {
-                    self.optimalRoute = backendRoutes.optimal
-                    self.saferRoute = backendRoutes.safer
-                    self.isLoading = false
-                }
-                return
-            }
-
-            // Fallback: MapKit (often returns same route for both when no alternates exist)
+            // Fastest: always MapKit default (user expectation: "the usual fastest route")
             let optimalMKRoute = try await withTimeout(seconds: 30) {
                 try await self.calculateOptimalRoute(from: start, to: destination)
-            }
-
-            let saferMKRoute = try await withTimeout(seconds: 30) {
-                try await self.calculateSaferRoute(from: start, to: destination)
             }
 
             let optimalRoute = try await withTimeout(seconds: 20) {
                 try await self.analyzeRoute(optimalMKRoute, type: .optimal)
             }
 
-            let saferRoute = try await withTimeout(seconds: 20) {
-                try await self.analyzeRoute(saferMKRoute, type: .safer)
+            // Safer: try backend first (graph-based risk routing in Toronto); else MapKit alternates + risk scoring
+            let saferRoute: Route
+            if let backendSafer = try? await fetchBackendSaferRoute(from: start, to: destination, optimalRouteForTimeScaling: optimalRoute) {
+                saferRoute = backendSafer
+            } else {
+                let saferMKRoute = try await withTimeout(seconds: 30) {
+                    try await self.calculateSaferRoute(from: start, to: destination)
+                }
+                saferRoute = try await withTimeout(seconds: 20) {
+                    try await self.analyzeRoute(saferMKRoute, type: .safer)
+                }
             }
 
             await MainActor.run {
@@ -72,8 +66,9 @@ class RouteService: ObservableObject {
         }
     }
 
-    /// Try backend /api/routes/safety-aware - returns (optimal, safer). Throws on failure.
-    private func fetchBackendRoutes(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D) async throws -> (optimal: Route, safer: Route) {
+    /// Fetch safer route from backend (Toronto area). Throws on failure.
+    /// Uses MapKit optimal route's effective speed to correct backend's optimistic travel time (free-flow vs real traffic).
+    private func fetchBackendSaferRoute(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D, optimalRouteForTimeScaling: Route? = nil) async throws -> Route {
         let routeCenter = CLLocationCoordinate2D(
             latitude: (start.latitude + destination.latitude) / 2,
             longitude: (start.longitude + destination.longitude) / 2
@@ -86,10 +81,15 @@ class RouteService: ObservableObject {
             weather: weather
         )
 
-        let optimal = Route(routeOption: response.fastest, routeType: .optimal)
-        let safer = Route(routeOption: response.safer, routeType: .safer)
+        var estimatedTimeOverride: TimeInterval?
+        if let optimal = optimalRouteForTimeScaling, optimal.distance > 0, optimal.estimatedTime > 0 {
+            let coords = response.safer.fullRouteCoordinates
+            let saferDistance = Route.computeDistanceStatic(coords: coords)
+            let effectiveSpeed = optimal.distance / optimal.estimatedTime
+            estimatedTimeOverride = saferDistance / effectiveSpeed
+        }
 
-        return (optimal, safer)
+        return Route(routeOption: response.safer, routeType: .safer, estimatedTimeOverride: estimatedTimeOverride)
     }
 
     private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
