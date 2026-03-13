@@ -27,8 +27,8 @@ class RiskService: ObservableObject {
         return message
     }
 
-    // fetch risk predictions for region
-    func fetchRiskPredictions(for region: MKCoordinateRegion) async throws -> [RoadSegment] {
+    // fetch risk predictions for region (pass weather for real-time risk adjustment)
+    func fetchRiskPredictions(for region: MKCoordinateRegion, weather: WeatherData? = nil) async throws -> [RoadSegment] {
         await MainActor.run {
             self.isLoading = true
         }
@@ -47,12 +47,24 @@ class RiskService: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.timeoutInterval = 30.0  // 30 second timeout
             
-            // send region bounds
-            let requestBody: [String: Any] = [
+            var requestBody: [String: Any] = [
                 "north": region.center.latitude + region.span.latitudeDelta / 2,
                 "south": region.center.latitude - region.span.latitudeDelta / 2,
                 "east": region.center.longitude + region.span.longitudeDelta / 2,
                 "west": region.center.longitude - region.span.longitudeDelta / 2
+            ]
+            if let weather = weather {
+                var weatherDict: [String: Any] = ["condition": weather.condition.rawValue]
+                weatherDict["temperature"] = weather.temperature
+                if let v = weather.visibility { weatherDict["visibility"] = v }
+                if let p = weather.precipitation { weatherDict["precipitation"] = p }
+                requestBody["weather"] = weatherDict
+            }
+            let cal = Calendar.current
+            let now = Date()
+            requestBody["time_of_day"] = [
+                "hour": cal.component(.hour, from: now),
+                "is_weekend": [1, 7].contains(cal.component(.weekday, from: now))
             ]
             
             request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
@@ -138,6 +150,72 @@ class RiskService: ObservableObject {
     func getHighRiskRoads() -> [RoadSegment] {
         return roadSegments.filter { $0.riskLevel == .high }
             .sorted { $0.numTotalCrashes > $1.numTotalCrashes }
+    }
+
+    /// Fetch risk definition (percentile thresholds) from backend
+    func fetchRiskDefinition() async throws -> RiskDefinitionResponse {
+        let urlString = "\(baseURL)/risk-definition"
+        guard let url = URL(string: urlString) else { throw APIError.invalidURL }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15.0
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw APIError.serverError("Failed to load risk definition")
+        }
+
+        return try JSONDecoder().decode(RiskDefinitionResponse.self, from: data)
+    }
+
+    /// Fetch safety-aware routes from backend (fastest vs safer - genuinely different routes from graph-based routing)
+    func fetchSafetyAwareRoutes(
+        origin: CLLocationCoordinate2D,
+        destination: CLLocationCoordinate2D,
+        weather: WeatherData? = nil
+    ) async throws -> SafetyAwareResponse {
+        let urlString = "\(baseURL)/routes/safety-aware"
+        guard let url = URL(string: urlString) else { throw APIError.invalidURL }
+
+        var requestBody: [String: Any] = [
+            "origin": ["latitude": origin.latitude, "longitude": origin.longitude],
+            "destination": ["latitude": destination.latitude, "longitude": destination.longitude],
+            "beta": 0.1
+        ]
+        if let weather = weather {
+            var weatherDict: [String: Any] = ["condition": weather.condition.rawValue]
+            weatherDict["temperature"] = weather.temperature
+            if let v = weather.visibility { weatherDict["visibility"] = v }
+            if let p = weather.precipitation { weatherDict["precipitation"] = p }
+            requestBody["weather"] = weatherDict
+        }
+        let cal = Calendar.current
+        let now = Date()
+        requestBody["time_of_day"] = [
+            "hour": cal.component(.hour, from: now),
+            "is_weekend": [1, 7].contains(cal.component(.weekday, from: now))
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 25.0
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.serverError("Invalid response")
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            let serverMessage = Self.parseServerError(from: data) ?? "Status code: \(httpResponse.statusCode)"
+            throw APIError.serverError(serverMessage)
+        }
+
+        return try JSONDecoder().decode(SafetyAwareResponse.self, from: data)
     }
 }
 

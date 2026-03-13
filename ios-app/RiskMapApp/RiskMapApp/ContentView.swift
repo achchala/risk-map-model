@@ -32,7 +32,7 @@ struct ContentView: View {
                 }
                 .tag(2)
 
-            RouteNavigationView()
+            RouteNavigationViewWrapper()
                 .tabItem {
                     Label("Navigation", systemImage: "location.north.circle")
                 }

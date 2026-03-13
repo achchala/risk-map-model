@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct HomeView: View {
-    @StateObject private var routeService = RouteService()
+    @EnvironmentObject var riskService: RiskService
     @Binding var selectedTab: Int
     @State private var riskDefinition: RiskDefinitionResponse?
 
@@ -116,7 +116,7 @@ struct HomeView: View {
 
     private func loadRiskDefinition() {
         Task {
-            if let def = try? await routeService.fetchRiskDefinition() {
+            if let def = try? await riskService.fetchRiskDefinition() {
                 await MainActor.run { riskDefinition = def }
             }
         }

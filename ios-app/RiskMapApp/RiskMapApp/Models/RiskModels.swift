@@ -7,6 +7,7 @@
 
 import Foundation
 import CoreLocation
+import MapKit
 
 // risk level enum
 enum RiskLevel: String, Codable, CaseIterable {
@@ -183,6 +184,171 @@ struct RiskDefinitionResponse: Codable {
     let low: String
     let medium: String
     let high: String
+}
+
+// MARK: - Route (MapKit or backend-based, for safer vs optimal comparison)
+struct Route: Identifiable {
+    let id = UUID()
+    let polyline: MKPolyline
+    let estimatedTime: TimeInterval
+    let distance: CLLocationDistance
+    let riskScore: Double
+    let highRiskSegments: Int
+    let mediumRiskSegments: Int
+    let lowRiskSegments: Int
+    let routeType: RouteType
+    private let _steps: [MKRoute.Step]?
+
+    enum RouteType {
+        case safer
+        case optimal
+    }
+
+    /// Create Route from MapKit MKRoute (after risk analysis)
+    init(mkRoute: MKRoute, riskScore: Double, highRiskSegments: Int, mediumRiskSegments: Int, lowRiskSegments: Int, routeType: RouteType) {
+        self.polyline = mkRoute.polyline
+        self.estimatedTime = mkRoute.expectedTravelTime
+        self.distance = mkRoute.distance
+        self.riskScore = riskScore
+        self.highRiskSegments = highRiskSegments
+        self.mediumRiskSegments = mediumRiskSegments
+        self.lowRiskSegments = lowRiskSegments
+        self.routeType = routeType
+        self._steps = mkRoute.steps
+    }
+
+    /// Create Route from backend safety-aware API response (produces genuinely different fastest vs safer)
+    init(routeOption: RouteOption, routeType: RouteType) {
+        let coords = routeOption.fullRouteCoordinates
+        self.polyline = MKPolyline(coordinates: coords, count: coords.count)
+        self.estimatedTime = routeOption.summary.totalTravelTimeHours * 3600
+        self.distance = Self.computeDistance(coords: coords)
+        let high = routeOption.summary.highRiskSegments ?? 0
+        let med = routeOption.summary.mediumRiskSegments ?? 0
+        let low = routeOption.summary.lowRiskSegments ?? 0
+        let total = high + med + low
+        self.riskScore = total > 0 ? (Double(high) * 3.0 + Double(med) * 2.0 + Double(low) * 1.0) / Double(total) : 0.0
+        self.highRiskSegments = high
+        self.mediumRiskSegments = med
+        self.lowRiskSegments = low
+        self.routeType = routeType
+        self._steps = nil
+    }
+
+    private static func computeDistance(coords: [CLLocationCoordinate2D]) -> CLLocationDistance {
+        guard coords.count >= 2 else { return 0 }
+        var total: CLLocationDistance = 0
+        for i in 0..<coords.count - 1 {
+            total += CLLocation(latitude: coords[i].latitude, longitude: coords[i].longitude)
+                .distance(from: CLLocation(latitude: coords[i + 1].latitude, longitude: coords[i + 1].longitude))
+        }
+        return total
+    }
+
+    var steps: [MKRoute.Step] {
+        _steps ?? []
+    }
+
+    var detailedCoordinates: [CLLocationCoordinate2D] {
+        polyline.coordinates
+    }
+
+    func safetyExplanation(comparedTo optimalRoute: Route?) -> String {
+        var reasons: [String] = []
+        if let optimal = optimalRoute {
+            let highRiskDiff = optimal.highRiskSegments - self.highRiskSegments
+            let riskScoreDiff = optimal.riskScore - self.riskScore
+            if highRiskDiff > 0 {
+                reasons.append("Avoids \(highRiskDiff) additional high-risk segment\(highRiskDiff > 1 ? "s" : "")")
+            }
+            if self.highRiskSegments == 0 {
+                reasons.append("Completely avoids high-risk roads")
+            } else if self.highRiskSegments < optimal.highRiskSegments {
+                reasons.append("Reduces high-risk exposure by \(highRiskDiff) segment\(highRiskDiff > 1 ? "s" : "")")
+            }
+            if riskScoreDiff > 0.3 {
+                reasons.append("Lower overall risk score (\(String(format: "%.1f", self.riskScore)) vs \(String(format: "%.1f", optimal.riskScore)))")
+            }
+            if self.lowRiskSegments > optimal.lowRiskSegments {
+                let diff = self.lowRiskSegments - optimal.lowRiskSegments
+                reasons.append("Uses \(diff) more low-risk segment\(diff > 1 ? "s" : "")")
+            }
+        }
+        return reasons.isEmpty ? "Optimized for safety" : reasons.joined(separator: ", ")
+    }
+}
+
+struct RouteComparison {
+    let saferRoute: Route
+    let optimalRoute: Route
+
+    var timeDifference: TimeInterval {
+        abs(saferRoute.estimatedTime - optimalRoute.estimatedTime)
+    }
+
+    var saferRouteSlower: Bool {
+        saferRoute.estimatedTime > optimalRoute.estimatedTime
+    }
+
+    var safetyImprovement: String {
+        let highRiskDiff = optimalRoute.highRiskSegments - saferRoute.highRiskSegments
+        let riskScoreDiff = optimalRoute.riskScore - saferRoute.riskScore
+        var improvements: [String] = []
+        if highRiskDiff > 0 {
+            improvements.append("\(highRiskDiff) fewer high-risk segment\(highRiskDiff > 1 ? "s" : "")")
+        }
+        if riskScoreDiff > 0.3 {
+            improvements.append("\(String(format: "%.1f", riskScoreDiff)) points lower risk score")
+        }
+        if saferRoute.lowRiskSegments > optimalRoute.lowRiskSegments {
+            let diff = saferRoute.lowRiskSegments - optimalRoute.lowRiskSegments
+            improvements.append("\(diff) more low-risk segment\(diff > 1 ? "s" : "")")
+        }
+        return improvements.isEmpty ? "Similar safety profile with optimized route planning" : improvements.joined(separator: ", ")
+    }
+
+    var detailedExplanation: String {
+        let highRiskDiff = optimalRoute.highRiskSegments - saferRoute.highRiskSegments
+        let riskScoreDiff = optimalRoute.riskScore - saferRoute.riskScore
+        var reasons: [String] = []
+        if highRiskDiff > 0 {
+            reasons.append("avoids \(highRiskDiff) high-risk road segment\(highRiskDiff > 1 ? "s" : "") that the fastest route would take")
+        }
+        if saferRoute.highRiskSegments == 0 && optimalRoute.highRiskSegments > 0 {
+            reasons.append("completely eliminates high-risk road exposure")
+        }
+        if riskScoreDiff > 0.5 {
+            reasons.append("has a significantly lower overall risk score (\(String(format: "%.1f", saferRoute.riskScore)) vs \(String(format: "%.1f", optimalRoute.riskScore)))")
+        }
+        if saferRoute.lowRiskSegments > optimalRoute.lowRiskSegments + 2 {
+            let diff = saferRoute.lowRiskSegments - optimalRoute.lowRiskSegments
+            reasons.append("uses \(diff) more low-risk road segments")
+        }
+        if reasons.isEmpty {
+            return "The safer route offers similar safety with optimized planning."
+        }
+        return "The safer route was selected because it " + reasons.joined(separator: " and ") + "."
+    }
+}
+
+// MARK: - MKRoute detailedCoordinates
+extension MKRoute {
+    var detailedCoordinates: [CLLocationCoordinate2D] {
+        var allCoords: [CLLocationCoordinate2D] = []
+        let polylineCoords = polyline.coordinates
+        if !steps.isEmpty {
+            for step in steps {
+                for coord in step.polyline.coordinates {
+                    if allCoords.isEmpty || !allCoords.contains(where: {
+                        abs($0.latitude - coord.latitude) < 0.00001 && abs($0.longitude - coord.longitude) < 0.00001
+                    }) {
+                        allCoords.append(coord)
+                    }
+                }
+            }
+        }
+        return allCoords.count >= 10 ? allCoords : polylineCoords
+    }
 }
 
 // API error
