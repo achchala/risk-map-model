@@ -2,16 +2,22 @@
 //  RiskMapApp.swift
 //  RiskMapApp
 //
-//  toronto road risk prediction!
+//  StreetSmart — safer routes in Toronto
 //
 
 import SwiftUI
 
 @main
 struct RiskMapApp: App {
+    @State private var showLanding = true
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            if showLanding {
+                LandingView(onContinue: { showLanding = false })
+            } else {
+                ContentView()
+            }
         }
     }
 }

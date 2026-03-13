@@ -60,17 +60,11 @@ struct RiskListRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(segment.linearName)
                     .font(.headline)
-                
-                HStack {
-                    Label("\(segment.numTotalCrashes) crashes", systemImage: "car.fill")
+                if let loc = segment.segmentLocation, !loc.isEmpty {
+                    Text(loc)
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
-                    if segment.numKSICrashes > 0 {
-                        Label("\(segment.numKSICrashes) KSI", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
+                        .lineLimit(2)
                 }
             }
             

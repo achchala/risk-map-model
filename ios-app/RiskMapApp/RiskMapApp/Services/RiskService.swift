@@ -20,6 +20,13 @@ class RiskService: ObservableObject {
     // For Simulator: "http://localhost:8000/api"
     // For Device: "http://10.10.11.47:8000/api" (update IP if needed)
     
+    /// Parse backend JSON error body: { "error": "message" }
+    private static func parseServerError(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = json["error"] as? String, !message.isEmpty else { return nil }
+        return message
+    }
+
     // fetch risk predictions for region
     func fetchRiskPredictions(for region: MKCoordinateRegion) async throws -> [RoadSegment] {
         await MainActor.run {
@@ -61,11 +68,12 @@ class RiskService: ObservableObject {
             }
             
             guard httpResponse.statusCode == 200 else {
+                let serverMessage = Self.parseServerError(from: data) ?? "Status code: \(httpResponse.statusCode)"
                 await MainActor.run {
-                    self.errorMessage = "Status code: \(httpResponse.statusCode)"
+                    self.errorMessage = serverMessage
                     self.isLoading = false
                 }
-                throw APIError.serverError("Status code: \(httpResponse.statusCode)")
+                throw APIError.serverError(serverMessage)
             }
             
             let segments = try JSONDecoder().decode([RoadSegment].self, from: data)
@@ -83,6 +91,12 @@ class RiskService: ObservableObject {
                 self.isLoading = false
             }
             throw APIError.decodingError
+        } catch let urlError as URLError where urlError.code == .cannotConnectToHost {
+            await MainActor.run {
+                self.errorMessage = "Backend not running. Start it: cd backend-api && python app.py"
+                self.isLoading = false
+            }
+            throw APIError.networkError(urlError)
         } catch {
             await MainActor.run {
                 self.errorMessage = error.localizedDescription

@@ -35,14 +35,42 @@ struct MapView: View {
                         let segmentColor = Color(hex: segment.riskLevel.color)
                         MapPolyline(coordinates: coords)
                             .stroke(segmentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
+                        // tappable annotation at segment center (MapPolyline doesn't support tap)
+                        Annotation("", coordinate: segment.centerCoordinate) {
+                            Button {
+                                selectedSegment = segment
+                            } label: {
+                                Circle()
+                                    .fill(segmentColor.opacity(0.9))
+                                    .frame(width: 12, height: 12)
+                                    .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .annotationTitles(.hidden)
                     }
                 }
             }
             .mapStyle(.standard)
             .mapControls {
-                MapUserLocationButton()
                 MapCompass()
                 MapScaleView()
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Button {
+                    cameraPosition = .region(MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: 43.6452, longitude: -79.3806), // Union Station Toronto
+                        span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+                    ))
+                } label: {
+                    Image(systemName: "location.fill")
+                        .font(.title2)
+                        .padding(10)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Circle())
+                }
+                .padding(.trailing, 12)
+                .padding(.bottom, 12)
             }
             .onAppear {
                 loadRiskData()
@@ -75,9 +103,29 @@ struct MapView: View {
                     .padding()
                 }
             }
+            
+            // tooltip when segment is selected (anchored at bottom)
+            if let segment = selectedSegment {
+                VStack {
+                    Spacer()
+                    SegmentTooltipView(segment: segment) {
+                        selectedSegment = nil
+                    } onSeeDetails: {
+                        showDetail = true
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 24)
+                }
+            }
         }
-        .sheet(item: $selectedSegment) { segment in
-            RiskDetailView(segment: segment)
+        .sheet(isPresented: $showDetail) {
+            if let segment = selectedSegment {
+                RiskDetailView(segment: segment)
+            }
+        }
+        .onChange(of: selectedSegment) { _, newValue in
+            showDetail = false
         }
     }
     
@@ -98,6 +146,58 @@ struct MapView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - segment tooltip (shown when user taps a road segment)
+struct SegmentTooltipView: View {
+    let segment: RoadSegment
+    let onDismiss: () -> Void
+    let onSeeDetails: () -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(segment.linearName)
+                        .font(.headline)
+                    HStack(spacing: 6) {
+                        Label(segment.riskLevel.displayName, systemImage: segment.riskLevel.systemImage)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundColor(Color(hex: segment.riskLevel.color))
+                        Text("•")
+                            .foregroundColor(.secondary)
+                        Text("\(Int(segment.confidence * 100))% confidence")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+            }
+            if let explanation = segment.riskExplanation, !explanation.isEmpty {
+                Text(explanation)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineSpacing(4)
+            }
+            Button("See details") {
+                onSeeDetails()
+            }
+            .font(.subheadline)
+            .fontWeight(.medium)
+        }
+        .padding()
+        .background(Color(UIColor.systemBackground))
+        .cornerRadius(12)
+        .shadow(radius: 8)
     }
 }
 

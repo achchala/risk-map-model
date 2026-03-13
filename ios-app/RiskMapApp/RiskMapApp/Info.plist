@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>RiskMap</string>
+	<string>StreetSmart</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -49,9 +49,9 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>RiskMap needs your location to show nearby road risk information.</string>
+	<string>StreetSmart uses your location to show nearby road risk and plan safer routes.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>RiskMap needs your location to show nearby road risk information.</string>
+	<string>StreetSmart uses your location to show nearby road risk and plan safer routes.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

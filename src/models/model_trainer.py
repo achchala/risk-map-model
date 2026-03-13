@@ -663,12 +663,13 @@ class HurdleTemporalTrainer:
         self.feature_columns: list[str] = []
         self.calibrator: Optional[IsotonicRegression] = None
 
-    def _prepare_features(
+    def prepare_panel_features(
         self,
         panel: pd.DataFrame,
         target_col: str = "future_crash_count",
+        explicit_feature_cols: Optional[list[str]] = None,
     ) -> Tuple[pd.DataFrame, pd.Series]:
-        """Extract feature matrix and target, mirroring TemporalCountModelTrainer."""
+        """Extract feature matrix and target; same API as TemporalCountModelTrainer (explicit_feature_cols unused)."""
         exclude = {
             "segment_id", "FROM_INTERSECTION_ID", "TO_INTERSECTION_ID",
             "segment_centroid_lat", "segment_centroid_lon",
@@ -703,9 +704,9 @@ class HurdleTemporalTrainer:
         """
         train_data, val_data, test_data = temporal_train_val_test_split(panel)
 
-        X_train, y_train = self._prepare_features(train_data, target_col)
-        X_val, y_val = self._prepare_features(val_data, target_col)
-        X_test, y_test = self._prepare_features(test_data, target_col)
+        X_train, y_train = self.prepare_panel_features(train_data, target_col=target_col)
+        X_val, y_val = self.prepare_panel_features(val_data, target_col=target_col)
+        X_test, y_test = self.prepare_panel_features(test_data, target_col=target_col)
 
         self.feature_columns = list(X_train.columns)
 

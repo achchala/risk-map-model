@@ -40,7 +40,7 @@ enum RiskLevel: String, Codable, CaseIterable {
 }
 
 // MARK: - Road Segment Model
-struct RoadSegment: Identifiable, Codable {
+struct RoadSegment: Identifiable, Codable, Equatable {
     let id: String
     let linearName: String
     let roadClass: String
@@ -51,8 +51,11 @@ struct RoadSegment: Identifiable, Codable {
     let numKSICrashes: Int
     let fatalityCount: Int
     let coordinates: [Coordinate]
+    let segmentLocation: String?
+    let riskDrivers: [String: Double]?
+    let riskExplanation: String?
     
-    struct Coordinate: Codable {
+    struct Coordinate: Codable, Equatable {
         let latitude: Double
         let longitude: Double
     }
@@ -68,6 +71,9 @@ struct RoadSegment: Identifiable, Codable {
         case numKSICrashes = "num_ksi_crashes"
         case fatalityCount = "fatality_count"
         case coordinates
+        case segmentLocation = "segment_location"
+        case riskDrivers
+        case riskExplanation = "risk_explanation"
     }
 }
 
@@ -83,6 +89,74 @@ struct RiskPredictionResponse: Codable {
         let medium: Double
         let high: Double
     }
+}
+
+// MARK: - Safety-aware routing API
+
+struct RouteSegment: Codable {
+    let segmentId: Int
+    let coordinates: [Coordinate]
+    let LINEAR_NAME: String
+    let ROAD_CLASS: String
+    let lambdaPerHour: Double
+    let expectedCrashes: Double
+    
+    struct Coordinate: Codable, Equatable {
+        let latitude: Double
+        let longitude: Double
+    }
+}
+
+struct RouteSummary: Codable {
+    let totalTravelTimeHours: Double
+    let expectedCrashes: Double
+    let routeProbability: Double
+}
+
+struct RouteOption: Codable {
+    let nodes: [Int]
+    let segmentIds: [Int]
+    let segments: [RouteSegment]
+    let summary: RouteSummary
+}
+
+struct AvoidedSegment: Codable, Identifiable, Equatable {
+    var id: Int { segmentId }
+    let segmentId: Int
+    let lambdaPerHour: Double
+    let riskDrivers: [String: Double]?
+    let riskExplanation: String?
+    let segmentLocation: String?
+    let coordinates: [RouteSegment.Coordinate]
+    let LINEAR_NAME: String
+    let ROAD_CLASS: String
+    let risk_label: String
+    
+    enum CodingKeys: String, CodingKey {
+        case segmentId, lambdaPerHour, riskDrivers, coordinates, LINEAR_NAME, ROAD_CLASS, risk_label
+        case riskExplanation = "risk_explanation"
+        case segmentLocation = "segment_location"
+    }
+    
+    var riskLevel: RiskLevel {
+        RiskLevel(rawValue: risk_label) ?? .medium
+    }
+}
+
+struct SafetyAwareResponse: Codable {
+    let fastest: RouteOption
+    let safer: RouteOption
+    let avoidedSegments: [AvoidedSegment]
+    let betaHoursPerExpectedCrash: Double
+}
+
+struct RiskDefinitionResponse: Codable {
+    let p70: Double
+    let p90: Double
+    let description: String
+    let low: String
+    let medium: String
+    let high: String
 }
 
 // API error

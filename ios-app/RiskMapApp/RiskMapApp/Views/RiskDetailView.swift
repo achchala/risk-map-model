@@ -20,6 +20,12 @@ struct RiskDetailView: View {
                             .font(.title)
                             .fontWeight(.bold)
                         
+                        if let loc = segment.segmentLocation, !loc.isEmpty {
+                            Text(loc)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        
                         HStack {
                             Label(segment.riskLevel.displayName, systemImage: segment.riskLevel.systemImage)
                                 .foregroundColor(Color(hex: segment.riskLevel.color))
@@ -48,27 +54,41 @@ struct RiskDetailView: View {
                     .background(Color(.systemGray6))
                     .cornerRadius(12)
                     
-                    // crash statistics
+                    // risk assessment & contributing factors
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Crash Statistics")
+                        Text("Why this risk level?")
                             .font(.headline)
                         
-                        InfoRow(label: "Total Crashes", value: "\(segment.numTotalCrashes)")
-                        InfoRow(label: "KSI Crashes", value: "\(segment.numKSICrashes)")
-                        InfoRow(label: "Fatalities", value: "\(segment.fatalityCount)")
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
-                    
-                    // risk assessment
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Risk Assessment")
-                            .font(.headline)
+                        if let explanation = segment.riskExplanation, !explanation.isEmpty {
+                            Text(explanation)
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .lineSpacing(6)
+                        } else {
+                            Text("This road segment has been identified as \(segment.riskLevel.displayName.lowercased()) risk based on historical crash data and road characteristics.")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .lineSpacing(6)
+                        }
                         
-                        Text("This road segment has been identified as \(segment.riskLevel.displayName.lowercased()) risk based on historical crash data and road characteristics.")
-                            .font(.body)
-                            .foregroundColor(.secondary)
+                        if let drivers = segment.riskDrivers, !drivers.isEmpty {
+                            Text("Contributing factors")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .padding(.top, 4)
+                            ForEach(Array(drivers.sorted(by: { abs($0.value) > abs($1.value) }).prefix(5)), id: \.key) { item in
+                                HStack {
+                                    Text(formatDriverLabel(item.key))
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                    Text(formatDriverValue(key: item.key, value: item.value))
+                                        .fontWeight(.medium)
+                                }
+                                .font(.caption)
+                            }
+                        }
                     }
                     .padding()
                     .background(Color(.systemGray6))
@@ -87,6 +107,32 @@ struct RiskDetailView: View {
             }
         }
     }
+}
+
+private func formatDriverLabel(_ key: String) -> String {
+    let labels: [String: String] = [
+        "crashes_1d_ago": "Crashes (24h)",
+        "crashes_7d_ago": "Crashes (7d)",
+        "crashes_30d_ago": "Crashes (30d)",
+        "rolling_mean_7d": "7d rolling avg",
+        "rolling_max_7d": "7d rolling peak",
+        "hist_crashes_per_year": "Historical crashes/yr",
+        "from_intersection_degree": "Intersection (from)",
+        "to_intersection_degree": "Intersection (to)",
+        "segment_length": "Segment length",
+        "datetime_hour": "Hour of day",
+        "day_of_week": "Day of week",
+        "is_weekend": "Weekend",
+        "month": "Month"
+    ]
+    return labels[key] ?? key.replacingOccurrences(of: "_", with: " ").capitalized
+}
+
+private func formatDriverValue(key: String, value: Double) -> String {
+    if key.contains("ratio") && value <= 1 { return String(format: "%.0f%%", value * 100) }
+    if key.contains("length") { return String(format: "%.0fm", value) }
+    if value == floor(value) { return String(format: "%.0f", value) }
+    return String(format: "%.2f", value)
 }
 
 struct InfoRow: View {

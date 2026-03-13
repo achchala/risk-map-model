@@ -3,6 +3,13 @@ flask API server
 serves risk predictions from the trained model
 """
 
+# Reduce chance of double-free in numpy/OpenBLAS/MKL (set before any numeric imports)
+import os
+
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 import numpy as np
@@ -18,7 +25,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # model & pipeline imports
-from src.models.model_trainer import TemporalCountModelTrainer  # type: ignore
+from src.models.model_trainer import TemporalCountModelTrainer, HurdleTemporalTrainer  # type: ignore
 from src.data_processing.data_loader import load_road_network
 from src.data_processing.spatial_join_fast import _ensure_stable_segment_id  # type: ignore
 from src.feature_engineering.panel_builder import PanelConfig  # type: ignore
@@ -39,36 +46,59 @@ try:
 except ImportError:
     # Fallback if config import fails
     COLLISION_COLUMNS = {
-        'latitude': 'LAT_WGS84',
-        'longitude': 'LONG_WGS84',
-        'date': 'OCC_DATE',
-        'time': 'OCC_HOUR',
-        'injury': 'INJURY_COLLISIONS',
-        'fatalities': 'FATALITIES'
+        "latitude": "LAT_WGS84",
+        "longitude": "LONG_WGS84",
+        "date": "OCC_DATE",
+        "time": "OCC_HOUR",
+        "injury": "INJURY_COLLISIONS",
+        "fatalities": "FATALITIES",
     }
     KSI_COLUMNS = {
-        'latitude': 'LATITUDE',
-        'longitude': 'LONGITUDE',
-        'date': 'DATE',
-        'time': 'TIME',
-        'injury': 'INJURY',
-        'fatalities': 'FATAL_NO'
+        "latitude": "LATITUDE",
+        "longitude": "LONGITUDE",
+        "date": "DATE",
+        "time": "TIME",
+        "injury": "INJURY",
+        "fatalities": "FATAL_NO",
     }
 
 app = Flask(__name__)
 CORS(app)
 
 # initialize temporal count model (predictive crash likelihood λ)
-TEMPORAL_MODEL_PATH = PROJECT_ROOT / "outputs" / "models" / "toronto_temporal_count_model.pkl"
-temporal_trainer: Optional[TemporalCountModelTrainer] = None
+# Pipeline saves HurdleTemporalTrainer; single-stage pipeline saves TemporalCountModelTrainer
+TEMPORAL_MODEL_PATH = (
+    PROJECT_ROOT / "outputs" / "models" / "toronto_temporal_count_model.pkl"
+)
+temporal_trainer = None
 
 try:
-    temporal_trainer = TemporalCountModelTrainer()
-    temporal_trainer.load_model(str(TEMPORAL_MODEL_PATH))
-    logging.info("Temporal count model loaded successfully")
+    _trainer = HurdleTemporalTrainer()
+    _trainer.load_model(str(TEMPORAL_MODEL_PATH))
+    temporal_trainer = _trainer
+    logging.info("Temporal count model (hurdle) loaded successfully")
 except Exception as e:
-    logging.warning(f"Failed to load temporal count model: {e}")
-    temporal_trainer = None
+    logging.warning(f"Failed to load hurdle model: {e}")
+    try:
+        _trainer = TemporalCountModelTrainer()
+        _trainer.load_model(str(TEMPORAL_MODEL_PATH))
+        temporal_trainer = _trainer
+        logging.info("Temporal count model loaded successfully")
+    except Exception as e2:
+        logging.warning(f"Failed to load temporal count model: {e2}")
+        temporal_trainer = None
+
+
+def _is_temporal_model_loaded():
+    """True if temporal_trainer is loaded and ready for inference (single-stage or hurdle)."""
+    if temporal_trainer is None:
+        return False
+    if getattr(temporal_trainer, "model", None) is not None:
+        return True
+    if getattr(temporal_trainer, "stage1", None) is not None:
+        return True
+    return False
+
 
 # Load road network (required for segments and routing)
 road_network = None
@@ -140,7 +170,7 @@ def _compute_lambda_map_for_latest_window():
     """
     global lambda_per_hour_latest, latest_window_start, _lambda_p70, _lambda_p90
 
-    if temporal_trainer is None or temporal_trainer.model is None:
+    if not _is_temporal_model_loaded():
         raise RuntimeError("Temporal count model is not loaded.")
     if panel_data is None or panel_data.empty:
         raise RuntimeError("Panel data is not loaded.")
@@ -175,6 +205,20 @@ def _compute_lambda_map_for_latest_window():
     )
 
 
+# Compute lambda map once at startup so request handlers don't run heavy numpy/sklearn in request context
+# (avoids potential double-free / teardown issues in some environments)
+if (
+    _is_temporal_model_loaded()
+    and panel_data is not None
+    and not getattr(panel_data, "empty", True)
+):
+    try:
+        _compute_lambda_map_for_latest_window()
+        logging.info("Lambda map computed at startup")
+    except Exception as e:
+        logging.warning(f"Could not compute lambda map at startup: {e}")
+
+
 def _get_risk_driver_features_for_segment(segment_id):
     """
     Extract a compact set of 'risk driver' features for a segment
@@ -192,23 +236,28 @@ def _get_risk_driver_features_for_segment(segment_id):
 
     row = row.iloc[0]
     keys = [
-        # static segment features
         "is_oneway",
         "from_intersection_degree",
         "to_intersection_degree",
-        # temporal context
-        "hour_of_day",
+        "segment_length",
         "day_of_week",
         "is_weekend",
         "month",
-        "season",
-        # crash history (weekly-spaced when using weekly windows)
+        "datetime_hour",
+        "crashes_1d_ago",
+        "crashes_7d_ago",
+        "crashes_30d_ago",
+        "rolling_mean_7d",
+        "rolling_max_7d",
+        "hist_crashes_per_year",
+        "hist_crash_hour_ratio",
+        "hist_crash_weekend_ratio",
+        "hour_of_day",
         "crashes_1_week_ago",
         "crashes_2_weeks_ago",
         "crashes_4_weeks_ago",
         "rolling_mean_4_weeks",
         "rolling_max_4_weeks",
-        # finer windows (hourly)
         "past_crash_count_1h",
         "past_crash_count_24h",
         "past_crash_count_7d",
@@ -216,7 +265,6 @@ def _get_risk_driver_features_for_segment(segment_id):
         "rolling_max_24h",
         "rolling_mean_7d",
         "rolling_max_30d",
-        # weather (if present)
         "temperature",
         "precipitation",
         "snow_mm",
@@ -227,29 +275,153 @@ def _get_risk_driver_features_for_segment(segment_id):
     ]
     drivers = {}
     for k in keys:
-        if k in row.index:
-            val = row[k]
+        if k not in row.index:
+            continue
+        val = row[k]
+        try:
             if isinstance(val, (np.integer, np.int64, np.int32)):
-                drivers[k] = int(val)
+                v = float(int(val))
             elif isinstance(val, (np.floating, np.float64, np.float32)):
-                drivers[k] = float(val)
+                v = float(val)
+            elif isinstance(val, (int, float)):
+                v = float(val)
             else:
-                drivers[k] = val
+                continue  # skip strings, bools - iOS expects [String: Double]
+            if v == v:  # exclude NaN
+                drivers[k] = v
+        except (TypeError, ValueError):
+            continue
     return drivers
+
+
+_FEATURE_LABELS = {
+    "crashes_1d_ago": "Crashes in last 24h",
+    "crashes_7d_ago": "Crashes in last 7 days",
+    "crashes_30d_ago": "Crashes in last 30 days",
+    "rolling_mean_7d": "7-day rolling crash average",
+    "rolling_max_7d": "7-day rolling crash peak",
+    "hist_crashes_per_year": "Historical crashes per year",
+    "hist_crash_hour_ratio": "Crash rate by hour pattern",
+    "hist_crash_weekend_ratio": "Weekend crash rate",
+    "from_intersection_degree": "Intersection complexity (from)",
+    "to_intersection_degree": "Intersection complexity (to)",
+    "segment_length": "Segment length",
+    "day_of_week": "Day of week",
+    "is_weekend": "Weekend",
+    "month": "Month",
+    "datetime_hour": "Hour of day",
+}
+
+
+def _build_risk_explanation(drivers: dict, risk_label: str) -> str:
+    """Build human-readable paragraph explaining which factors contributed to risk."""
+    risk_text = risk_label.replace("_", " ").title()
+    if not drivers:
+        return (
+            f"This segment is rated {risk_text} risk based on the predicted crash rate (λ) "
+            "for this segment."
+        )
+    parts = []
+    for k, v in sorted(
+        drivers.items(),
+        key=lambda x: -abs(x[1]) if isinstance(x[1], (int, float)) else 0,
+    ):
+        if v is None or (isinstance(v, (int, float)) and v == 0):
+            continue
+        label = _FEATURE_LABELS.get(k, k.replace("_", " ").title())
+        if isinstance(v, (int, float)):
+            if "crash" in k.lower() or "hist" in k.lower():
+                parts.append(
+                    f"{label} ({v:.1f})" if isinstance(v, float) else f"{label} ({v})"
+                )
+            elif "degree" in k:
+                parts.append(f"{label} ({v})")
+            elif "ratio" in k:
+                parts.append(f"{label} ({v:.0%})" if v <= 1 else f"{label} ({v:.1f})")
+            elif "length" in k:
+                parts.append(
+                    f"{label} ({v:.1f}m)" if isinstance(v, float) else f"{label} ({v}m)"
+                )
+            else:
+                parts.append(
+                    f"{label} ({v:.1f})" if isinstance(v, float) else f"{label} ({v})"
+                )
+        else:
+            parts.append(f"{label} ({v})")
+        if len(parts) >= 5:
+            break
+    if not parts:
+        return (
+            f"This segment is rated {risk_text} risk based on the predicted crash rate (λ) "
+            "for this segment."
+        )
+    if len(parts) == 1:
+        factor_text = parts[0]
+    elif len(parts) == 2:
+        factor_text = f"{parts[0]} and {parts[1]}"
+    else:
+        factor_text = ", ".join(parts[:-1]) + ", and " + parts[-1]
+    return (
+        f"This segment is rated {risk_text} risk based on the predicted crash rate. "
+        f"The main contributing factors are: {factor_text}."
+    )
+
+
+def _safe_str_val(val, default=""):
+    """Safe string conversion for segment location fields."""
+    if val is None or (hasattr(val, "__float__") and np.isnan(val)):
+        return default
+    s = str(val).strip()
+    return s if s else default
+
+
+def _get_segment_location_description(row) -> str:
+    """Build 'from X to Y' description using cross-street names or coordinates."""
+    if row is None:
+        return ""
+    # Toronto Centreline: LF_NAME = left-facing street, RF_NAME = right-facing street (cross streets)
+    lf = _safe_str_val(row.get("LF_NAME"), "")
+    rf = _safe_str_val(row.get("RF_NAME"), "")
+    if lf and rf:
+        if lf == rf:
+            return f"At {lf}"
+        return f"From {lf} to {rf}"
+    # Fallback: use first and last coordinates from geometry
+    geom = row.get("geometry")
+    if geom is not None:
+        coords = []
+        if hasattr(geom, "geoms") and geom.geoms:
+            for g in geom.geoms:
+                if hasattr(g, "coords"):
+                    coords.extend(g.coords)
+        elif hasattr(geom, "coords"):
+            coords = list(geom.coords)
+        if len(coords) >= 2:
+            lon1, lat1 = coords[0][0], coords[0][1]
+            lon2, lat2 = coords[-1][0], coords[-1][1]
+            return f"From ({lat1:.4f}, {lon1:.4f}) to ({lat2:.4f}, {lon2:.4f})"
+    return ""
 
 
 @app.route("/api/health", methods=["GET"])
 def health_check():
-    """Health check endpoint"""
+    """Health check endpoint. Use to see why risk endpoints may return 500."""
+    model_ok = _is_temporal_model_loaded()
+    panel_ok = panel_data is not None and not getattr(panel_data, "empty", True)
     return jsonify(
         {
-            "status": "healthy",
-            "temporal_model_loaded": temporal_trainer is not None
-            and temporal_trainer.model is not None,  # type: ignore[truthy-function]
+            "status": "healthy" if road_network is not None else "degraded",
+            "temporal_model_loaded": model_ok,
             "road_network_loaded": road_network is not None,
             "routing_graph_built": road_graph is not None and node_coords is not None,
-            "panel_loaded": panel_data is not None,
+            "panel_loaded": panel_ok,
             "road_segments": len(road_network) if road_network is not None else 0,
+            "panel_rows": int(len(panel_data)) if panel_ok else 0,
+            "hint": (
+                "Run train_temporal_model.py from project root and ensure outputs/models/toronto_temporal_count_model.pkl and outputs/reports/panel_latest.parquet exist."
+                if (not model_ok or not panel_ok) and road_network is not None
+                else None
+            ),
         }
     )
 
@@ -269,7 +441,7 @@ def get_risk_predictions():
     """
     if road_network is None:
         return jsonify({"error": "Road network not loaded"}), 500
-    if temporal_trainer is None or temporal_trainer.model is None:
+    if not _is_temporal_model_loaded():
         return jsonify({"error": "Temporal model not loaded"}), 500
     if panel_data is None or panel_data.empty:
         return jsonify({"error": "Panel data not loaded"}), 500
@@ -294,33 +466,66 @@ def get_risk_predictions():
                 lam = lambda_per_hour_latest.get(int(seg_id), 0.0)  # type: ignore[union-attr]
             return _lambda_to_risk_label(lam)
 
-        segments_in_bbox["risk_label"] = segments_in_bbox.apply(_get_risk_for_row, axis=1)
+        segments_in_bbox["risk_label"] = segments_in_bbox.apply(
+            _get_risk_for_row, axis=1
+        )
 
         if len(segments_in_bbox) > 500:
             risk_priority = {"high": 3, "medium": 2, "low": 1}
-            segments_in_bbox["_risk_priority"] = segments_in_bbox["risk_label"].map(risk_priority)
-            segments_in_bbox = segments_in_bbox.sort_values("_risk_priority", ascending=False).head(500)
+            segments_in_bbox["_risk_priority"] = segments_in_bbox["risk_label"].map(
+                risk_priority
+            )
+            segments_in_bbox = segments_in_bbox.sort_values(
+                "_risk_priority", ascending=False
+            ).head(500)
 
         results = []
+        p70 = _lambda_p70 or 0.0
+        p90 = _lambda_p90 or 0.0
         for idx, segment in segments_in_bbox.iterrows():
             coords = _extract_coordinates(segment.geometry)
             risk_label = segment["risk_label"]
-            lam = lambda_per_hour_latest.get(segment.get("segment_id") or segment.get("CENTRELINE_ID", idx), 0.0)  # type: ignore[union-attr]
+            seg_id = segment.get("segment_id") or segment.get("CENTRELINE_ID", idx)
+            lam = lambda_per_hour_latest.get(seg_id, 0.0)  # type: ignore[union-attr]
+            if (
+                lam == 0.0
+                and isinstance(seg_id, (float, np.floating))
+                and not np.isnan(seg_id)
+            ):
+                lam = lambda_per_hour_latest.get(int(seg_id), 0.0)  # type: ignore[union-attr]
+
             wh = temporal_trainer.panel_config.window_size_hours or 1  # type: ignore[union-attr]
             prob_crash = 1.0 - np.exp(-max(0, lam * wh))
-            confidence = float(np.clip(prob_crash, 0.0, 1.0))
+            if risk_label == "high" and p90 > 0:
+                confidence = 0.5 + 0.5 * min(1.0, (lam - p90) / (p90 * 0.5 + 1e-9))
+            elif risk_label == "medium" and p70 < p90:
+                confidence = 0.5 + 0.3 * min(
+                    1.0, abs(lam - (p70 + p90) / 2) / (p90 - p70 + 1e-9)
+                )
+            elif risk_label == "low" and p70 > 0:
+                confidence = 0.5 + 0.5 * min(1.0, (p70 - lam) / (p70 * 0.5 + 1e-9))
+            else:
+                confidence = max(float(prob_crash), 0.5)
+            confidence = float(np.clip(confidence, 0.01, 1.0))
 
+            drivers = _get_risk_driver_features_for_segment(seg_id)
+            risk_explanation = _build_risk_explanation(drivers, risk_label)
+
+            segment_location = _get_segment_location_description(segment)
             result = {
-                "id": str(segment.get("segment_id", idx)),
+                "id": str(seg_id),
                 "LINEAR_NAME": segment.get("LINEAR_NAME", "Unknown"),
                 "ROAD_CLASS": segment.get("ROAD_CLASS", "Unknown"),
                 "segment_length": float(segment.get("segment_length", 0)),
+                "segment_location": segment_location,
                 "risk_label": risk_label,
                 "confidence": confidence,
                 "num_total_crashes": int(segment.get("num_total_crashes", 0)),
                 "num_ksi_crashes": int(segment.get("num_ksi_crashes", 0)),
                 "fatality_count": int(segment.get("fatality_count", 0)),
                 "coordinates": coords[:50],
+                "riskDrivers": drivers,
+                "risk_explanation": risk_explanation,
             }
             results.append(result)
 
@@ -333,6 +538,55 @@ def get_risk_predictions():
 
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+def _route_risk_multipliers(weather_data, time_data):
+    """
+    Return (weather_mult, time_mult) for route risk adjustment.
+    Each is >= 0; 1.0 means no change. Used when app sends live weather/time for safety-aware routing.
+    """
+    weather_mult = 1.0
+    if weather_data and isinstance(weather_data, dict):
+        cond = (weather_data.get("condition") or "clear").lower()
+        if cond in ("rain", "heavy_rain"):
+            weather_mult = 1.35
+        elif cond in ("snow", "heavy_snow"):
+            weather_mult = 1.5
+        elif cond in ("fog", "mist"):
+            weather_mult = 1.2
+        elif cond == "thunderstorm":
+            weather_mult = 1.5
+        elif cond == "sleet":
+            weather_mult = 1.4
+    time_mult = 1.0
+    if time_data and isinstance(time_data, dict):
+        hour = time_data.get("hour")
+        if hour is not None:
+            try:
+                h = int(hour)
+                if h >= 23 or h < 5:
+                    time_mult = 1.3
+                elif (7 <= h <= 9) or (17 <= h <= 19):
+                    time_mult = 1.25 if not time_data.get("is_weekend") else 1.1
+            except (TypeError, ValueError):
+                pass
+    return (weather_mult, time_mult)
+
+
+def _segment_row_by_id(seg_id):
+    """Look up a road_network row by segment_id or CENTRELINE_ID. Returns None if not found."""
+    if road_network is None:
+        return None
+    for col in ("segment_id", "CENTRELINE_ID"):
+        if col not in road_network.columns:
+            continue
+        try:
+            match = road_network[road_network[col].astype(type(seg_id)) == seg_id]
+        except (TypeError, ValueError):
+            match = road_network[road_network[col] == seg_id]
+        if not match.empty:
+            return match.iloc[0]
+    return None
 
 
 def _extract_coordinates(geometry):
@@ -386,7 +640,7 @@ def get_risk_prediction():
     """
     if road_network is None:
         return jsonify({"error": "Road network not loaded"}), 500
-    if temporal_trainer is None or temporal_trainer.model is None:
+    if not _is_temporal_model_loaded():
         return jsonify({"error": "Temporal model not loaded"}), 500
     if panel_data is None or panel_data.empty:
         return jsonify({"error": "Panel data not loaded"}), 500
@@ -413,7 +667,9 @@ def get_risk_prediction():
             if lambda_per_hour_latest is None:
                 _compute_lambda_map_for_latest_window()
 
-            seg_id = segment.get("segment_id") or segment.get("CENTRELINE_ID", nearest_idx)
+            seg_id = segment.get("segment_id") or segment.get(
+                "CENTRELINE_ID", nearest_idx
+            )
             lam = lambda_per_hour_latest.get(seg_id, 0.0)  # type: ignore[union-attr]
             if lam == 0.0 and isinstance(seg_id, float) and not np.isnan(seg_id):
                 lam = lambda_per_hour_latest.get(int(seg_id), 0.0)  # type: ignore[union-attr]
@@ -475,15 +731,12 @@ def get_safety_aware_route():
     {
         "origin": {"latitude": float, "longitude": float},
         "destination": {"latitude": float, "longitude": float},
-        "beta": float (optional, hours per expected crash)
+        "beta": float (optional, hours per expected crash),
+        "weather": {"condition": str, "temperature": float, ...} (optional, for risk adjustment),
+        "time_of_day": {"hour": int, "is_weekend": bool} (optional, for risk adjustment)
     }
     """
-    if (
-        temporal_trainer is None
-        or temporal_trainer.model is None  # type: ignore[truthy-function]
-        or road_graph is None
-        or node_coords is None
-    ):
+    if not _is_temporal_model_loaded() or road_graph is None or node_coords is None:
         return (
             jsonify(
                 {
@@ -505,7 +758,19 @@ def get_safety_aware_route():
         d_lon = destination.get("longitude")
 
         if None in (o_lat, o_lon, d_lat, d_lon):
-            return jsonify({"error": "origin and destination must include latitude and longitude"}), 400
+            return (
+                jsonify(
+                    {
+                        "error": "origin and destination must include latitude and longitude"
+                    }
+                ),
+                400,
+            )
+
+        weather_data = data.get("weather")
+        time_data = data.get("time_of_day")
+        weather_mult, time_mult = _route_risk_multipliers(weather_data, time_data)
+        combined_mult = weather_mult * time_mult
 
         origin_point = Point(o_lon, o_lat)
         dest_point = Point(d_lon, d_lat)
@@ -515,8 +780,15 @@ def get_safety_aware_route():
         if lambda_per_hour_latest is None:
             _compute_lambda_map_for_latest_window()
 
+        # Optionally adjust λ by current weather/time so safer route reflects conditions
+        lam_for_routing = lambda_per_hour_latest
+        if combined_mult != 1.0 and lambda_per_hour_latest:
+            lam_for_routing = {
+                k: v * combined_mult for k, v in lambda_per_hour_latest.items()
+            }
+
         # Apply λ to edges as expected_crashes and risk-weight
-        apply_risk_to_edge_costs(road_graph, lambda_per_hour_latest, beta_hours_per_expected_crash=beta)  # type: ignore[arg-type]
+        apply_risk_to_edge_costs(road_graph, lam_for_routing, beta_hours_per_expected_crash=beta)  # type: ignore[arg-type]
 
         # Snap origin/destination to nearest graph nodes
         start_node = snap_to_graph(origin_point, node_coords)  # type: ignore[arg-type]
@@ -533,39 +805,114 @@ def get_safety_aware_route():
         fastest_edges = path_edges(road_graph, fastest_path)  # type: ignore[arg-type]
         safer_edges = path_edges(road_graph, safer_path)  # type: ignore[arg-type]
 
-        fastest_segments = {data["segment_id"] for _, _, data in fastest_edges}
-        safer_segments = {data["segment_id"] for _, _, data in safer_edges}
+        fastest_segments_set = {data["segment_id"] for _, _, data in fastest_edges}
+        safer_segments_set = {data["segment_id"] for _, _, data in safer_edges}
 
-        avoided_segments = sorted(fastest_segments - safer_segments)
+        avoided_segments = sorted(fastest_segments_set - safer_segments_set)
 
-        # Build risk driver explanations for avoided segments
+        def _safe_str(val, default="Unknown"):
+            if val is None or (hasattr(val, "__float__") and np.isnan(val)):
+                return default
+            return str(val)
+
+        def _build_segment_list(edges):
+            out = []
+            for _, _, data in edges:
+                seg_id = data["segment_id"]
+                seg_id_int = int(seg_id) if hasattr(seg_id, "__int__") else seg_id
+                lam = (
+                    float(lambda_per_hour_latest.get(seg_id, 0.0))
+                    if lambda_per_hour_latest
+                    else 0.0
+                )
+                expected_crashes = float(data.get("expected_crashes", 0.0))
+                row = _segment_row_by_id(seg_id)
+                coords = (
+                    _extract_coordinates(row.geometry)[:50] if row is not None else []
+                )
+                out.append(
+                    {
+                        "segmentId": seg_id_int,
+                        "coordinates": coords,
+                        "LINEAR_NAME": (
+                            _safe_str(row.get("LINEAR_NAME"), "Unknown")
+                            if row is not None
+                            else "Unknown"
+                        ),
+                        "ROAD_CLASS": (
+                            _safe_str(row.get("ROAD_CLASS"), "Unknown")
+                            if row is not None
+                            else "Unknown"
+                        ),
+                        "lambdaPerHour": lam,
+                        "expectedCrashes": expected_crashes,
+                    }
+                )
+            return out
+
+        fastest_segments_list = _build_segment_list(fastest_edges)
+        safer_segments_list = _build_segment_list(safer_edges)
+
+        # Build risk driver explanations for avoided segments with geometry and labels
         avoided_details = []
         for seg_id in avoided_segments:
-            lam = float(lambda_per_hour_latest.get(seg_id, 0.0)) if lambda_per_hour_latest is not None else 0.0
+            lam = (
+                float(lambda_per_hour_latest.get(seg_id, 0.0))
+                if lambda_per_hour_latest is not None
+                else 0.0
+            )
             drivers = _get_risk_driver_features_for_segment(seg_id)
+            risk_label = _lambda_to_risk_label(lam)
+            risk_explanation = _build_risk_explanation(drivers, risk_label)
+            row = _segment_row_by_id(seg_id)
+            coords = _extract_coordinates(row.geometry)[:50] if row is not None else []
+            seg_id_int = int(seg_id) if hasattr(seg_id, "__int__") else seg_id
+            segment_location = (
+                _get_segment_location_description(row) if row is not None else ""
+            )
             avoided_details.append(
                 {
-                    "segmentId": seg_id,
+                    "segmentId": seg_id_int,
                     "lambdaPerHour": lam,
                     "riskDrivers": drivers,
+                    "risk_explanation": risk_explanation,
+                    "segment_location": segment_location,
+                    "coordinates": coords,
+                    "LINEAR_NAME": (
+                        _safe_str(row.get("LINEAR_NAME"), "Unknown")
+                        if row is not None
+                        else "Unknown"
+                    ),
+                    "ROAD_CLASS": (
+                        _safe_str(row.get("ROAD_CLASS"), "Unknown")
+                        if row is not None
+                        else "Unknown"
+                    ),
+                    "risk_label": risk_label,
                 }
             )
 
         response = {
             "fastest": {
                 "nodes": fastest_path,
-                "segmentIds": list(fastest_segments),
+                "segmentIds": list(fastest_segments_set),
+                "segments": fastest_segments_list,
                 "summary": {
-                    "totalTravelTimeHours": float(fastest_summary["total_travel_time_hours"]),
+                    "totalTravelTimeHours": float(
+                        fastest_summary["total_travel_time_hours"]
+                    ),
                     "expectedCrashes": float(fastest_summary["expected_crashes"]),
                     "routeProbability": float(fastest_summary["route_probability"]),
                 },
             },
             "safer": {
                 "nodes": safer_path,
-                "segmentIds": list(safer_segments),
+                "segmentIds": list(safer_segments_set),
+                "segments": safer_segments_list,
                 "summary": {
-                    "totalTravelTimeHours": float(safer_summary["total_travel_time_hours"]),
+                    "totalTravelTimeHours": float(
+                        safer_summary["total_travel_time_hours"]
+                    ),
                     "expectedCrashes": float(safer_summary["expected_crashes"]),
                     "routeProbability": float(safer_summary["route_probability"]),
                 },
@@ -582,6 +929,29 @@ def get_safety_aware_route():
 
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/risk-definition", methods=["GET"])
+def get_risk_definition():
+    """
+    Return percentile thresholds and short copy for what low/medium/high risk means.
+    Lambda map is computed at startup; this endpoint only reads precomputed values.
+    """
+    if _lambda_p70 is None or _lambda_p90 is None:
+        return jsonify({"error": "Risk thresholds not available"}), 503
+    return jsonify(
+        {
+            "p70": float(_lambda_p70),
+            "p90": float(_lambda_p90),
+            "description": (
+                "Risk is based on predicted crash rate (λ) per segment. "
+                "Low = bottom 70% of segments, Medium = 70th–90th percentile, High = top 10%."
+            ),
+            "low": "Bottom 70% of segments by predicted crash rate",
+            "medium": "70th–90th percentile",
+            "high": "Top 10% of segments by predicted crash rate",
+        }
+    )
 
 
 @app.route("/data-validation", methods=["GET"])
@@ -617,43 +987,79 @@ def fatality_diagnostic():
     try:
         # Load raw data to inspect
         data_dir = PROJECT_ROOT / "data"
-        
+
         diagnostic_info = {
             "error": None,
             "collision_data": {},
             "ksi_data": {},
-            "sample_records": {}
+            "sample_records": {},
         }
-        
+
         try:
             # Actually load collision and KSI data
-            from src.data_processing.data_loader import load_collision_data, load_ksi_data
-            
+            from src.data_processing.data_loader import (
+                load_collision_data,
+                load_ksi_data,
+            )
+
             try:
                 collision_raw = load_collision_data(data_dir)
                 diagnostic_info["collision_data"] = {
                     "total_records": len(collision_raw),
                     "columns": list(collision_raw.columns),
-                    "fatalities_column": COLLISION_COLUMNS.get('fatalities', 'FATALITIES'),
-                    "injury_column": COLLISION_COLUMNS.get('injury', 'INJURY_COLLISIONS'),
-                    "has_fatalities_col": COLLISION_COLUMNS.get('fatalities', 'FATALITIES') in collision_raw.columns,
-                    "has_injury_col": COLLISION_COLUMNS.get('injury', 'INJURY_COLLISIONS') in collision_raw.columns,
+                    "fatalities_column": COLLISION_COLUMNS.get(
+                        "fatalities", "FATALITIES"
+                    ),
+                    "injury_column": COLLISION_COLUMNS.get(
+                        "injury", "INJURY_COLLISIONS"
+                    ),
+                    "has_fatalities_col": COLLISION_COLUMNS.get(
+                        "fatalities", "FATALITIES"
+                    )
+                    in collision_raw.columns,
+                    "has_injury_col": COLLISION_COLUMNS.get(
+                        "injury", "INJURY_COLLISIONS"
+                    )
+                    in collision_raw.columns,
                 }
-                
+
                 # Check what values exist in these columns
-                fatalities_col = COLLISION_COLUMNS.get('fatalities', 'FATALITIES')
-                injury_col = COLLISION_COLUMNS.get('injury', 'INJURY_COLLISIONS')
-                
+                fatalities_col = COLLISION_COLUMNS.get("fatalities", "FATALITIES")
+                injury_col = COLLISION_COLUMNS.get("injury", "INJURY_COLLISIONS")
+
                 if fatalities_col in collision_raw.columns:
-                    non_zero_fatalities = collision_raw[collision_raw[fatalities_col] > 0] if pd.api.types.is_numeric_dtype(collision_raw[fatalities_col]) else collision_raw[collision_raw[fatalities_col].notna() & (collision_raw[fatalities_col].astype(str).str.lower() != '0')]
-                    diagnostic_info["collision_data"]["non_zero_fatalities_count"] = len(non_zero_fatalities)
+                    non_zero_fatalities = (
+                        collision_raw[collision_raw[fatalities_col] > 0]
+                        if pd.api.types.is_numeric_dtype(collision_raw[fatalities_col])
+                        else collision_raw[
+                            collision_raw[fatalities_col].notna()
+                            & (
+                                collision_raw[fatalities_col].astype(str).str.lower()
+                                != "0"
+                            )
+                        ]
+                    )
+                    diagnostic_info["collision_data"]["non_zero_fatalities_count"] = (
+                        len(non_zero_fatalities)
+                    )
                     fatalities_stats = {}
                     if len(collision_raw) > 0:
-                        value_counts = collision_raw[fatalities_col].value_counts().head(10).to_dict()
+                        value_counts = (
+                            collision_raw[fatalities_col]
+                            .value_counts()
+                            .head(10)
+                            .to_dict()
+                        )
                         fatalities_stats = {
-                            "total_non_null": int(collision_raw[fatalities_col].notna().sum()),
-                            "unique_values": _convert_to_json_serializable(value_counts),
-                            "sample_values": _convert_to_json_serializable(collision_raw[fatalities_col].head(10).tolist()),
+                            "total_non_null": int(
+                                collision_raw[fatalities_col].notna().sum()
+                            ),
+                            "unique_values": _convert_to_json_serializable(
+                                value_counts
+                            ),
+                            "sample_values": _convert_to_json_serializable(
+                                collision_raw[fatalities_col].head(10).tolist()
+                            ),
                         }
                     else:
                         fatalities_stats = {
@@ -661,57 +1067,104 @@ def fatality_diagnostic():
                             "unique_values": {},
                             "sample_values": [],
                         }
-                    diagnostic_info["collision_data"]["fatalities_column_stats"] = fatalities_stats
-                
+                    diagnostic_info["collision_data"][
+                        "fatalities_column_stats"
+                    ] = fatalities_stats
+
                 if injury_col in collision_raw.columns:
-                    fatal_in_injury = collision_raw[collision_raw[injury_col].astype(str).str.contains('Fatal', case=False, na=False)]
-                    diagnostic_info["collision_data"]["fatal_in_injury_count"] = len(fatal_in_injury)
+                    fatal_in_injury = collision_raw[
+                        collision_raw[injury_col]
+                        .astype(str)
+                        .str.contains("Fatal", case=False, na=False)
+                    ]
+                    diagnostic_info["collision_data"]["fatal_in_injury_count"] = len(
+                        fatal_in_injury
+                    )
                     if len(collision_raw) > 0:
-                        injury_values = collision_raw[injury_col].value_counts().head(10).to_dict()
-                        diagnostic_info["collision_data"]["injury_column_unique_values"] = _convert_to_json_serializable(injury_values)
+                        injury_values = (
+                            collision_raw[injury_col].value_counts().head(10).to_dict()
+                        )
+                        diagnostic_info["collision_data"][
+                            "injury_column_unique_values"
+                        ] = _convert_to_json_serializable(injury_values)
                     else:
-                        diagnostic_info["collision_data"]["injury_column_unique_values"] = {}
-                
+                        diagnostic_info["collision_data"][
+                            "injury_column_unique_values"
+                        ] = {}
+
                 # Sample records with potential fatalities
                 if fatalities_col in collision_raw.columns:
-                    sample_fatal = collision_raw.nlargest(5, fatalities_col) if pd.api.types.is_numeric_dtype(collision_raw[fatalities_col]) else collision_raw.head(5)
+                    sample_fatal = (
+                        collision_raw.nlargest(5, fatalities_col)
+                        if pd.api.types.is_numeric_dtype(collision_raw[fatalities_col])
+                        else collision_raw.head(5)
+                    )
                     diagnostic_info["sample_records"]["collision_with_fatalities"] = [
                         {
-                            "fatalities_col_value": str(record.get(fatalities_col, 'N/A')),
-                            "injury_col_value": str(record.get(injury_col, 'N/A')) if injury_col in record.index else 'N/A',
-                            "columns_with_fatal": [col for col in record.index if 'fatal' in col.lower() or 'death' in col.lower()],
+                            "fatalities_col_value": str(
+                                record.get(fatalities_col, "N/A")
+                            ),
+                            "injury_col_value": (
+                                str(record.get(injury_col, "N/A"))
+                                if injury_col in record.index
+                                else "N/A"
+                            ),
+                            "columns_with_fatal": [
+                                col
+                                for col in record.index
+                                if "fatal" in col.lower() or "death" in col.lower()
+                            ],
                         }
                         for idx, record in sample_fatal.iterrows()
                     ]
-                
+
             except Exception as e:
                 diagnostic_info["collision_data"]["error"] = str(e)
-            
+
             try:
                 ksi_raw = load_ksi_data(data_dir)
                 diagnostic_info["ksi_data"] = {
                     "total_records": len(ksi_raw),
                     "columns": list(ksi_raw.columns),
-                    "fatalities_column": KSI_COLUMNS.get('fatalities', 'FATAL_NO'),
-                    "injury_column": KSI_COLUMNS.get('injury', 'INJURY'),
-                    "has_fatalities_col": KSI_COLUMNS.get('fatalities', 'FATAL_NO') in ksi_raw.columns,
-                    "has_injury_col": KSI_COLUMNS.get('injury', 'INJURY') in ksi_raw.columns,
+                    "fatalities_column": KSI_COLUMNS.get("fatalities", "FATAL_NO"),
+                    "injury_column": KSI_COLUMNS.get("injury", "INJURY"),
+                    "has_fatalities_col": KSI_COLUMNS.get("fatalities", "FATAL_NO")
+                    in ksi_raw.columns,
+                    "has_injury_col": KSI_COLUMNS.get("injury", "INJURY")
+                    in ksi_raw.columns,
                 }
-                
+
                 # Check what values exist in these columns
-                fatalities_col = KSI_COLUMNS.get('fatalities', 'FATAL_NO')
-                injury_col = KSI_COLUMNS.get('injury', 'INJURY')
-                
+                fatalities_col = KSI_COLUMNS.get("fatalities", "FATAL_NO")
+                injury_col = KSI_COLUMNS.get("injury", "INJURY")
+
                 if fatalities_col in ksi_raw.columns:
-                    non_zero_fatalities = ksi_raw[ksi_raw[fatalities_col] > 0] if pd.api.types.is_numeric_dtype(ksi_raw[fatalities_col]) else ksi_raw[ksi_raw[fatalities_col].notna() & (ksi_raw[fatalities_col].astype(str).str.lower() != '0')]
-                    diagnostic_info["ksi_data"]["non_zero_fatalities_count"] = len(non_zero_fatalities)
+                    non_zero_fatalities = (
+                        ksi_raw[ksi_raw[fatalities_col] > 0]
+                        if pd.api.types.is_numeric_dtype(ksi_raw[fatalities_col])
+                        else ksi_raw[
+                            ksi_raw[fatalities_col].notna()
+                            & (ksi_raw[fatalities_col].astype(str).str.lower() != "0")
+                        ]
+                    )
+                    diagnostic_info["ksi_data"]["non_zero_fatalities_count"] = len(
+                        non_zero_fatalities
+                    )
                     ksi_fatalities_stats = {}
                     if len(ksi_raw) > 0:
-                        value_counts = ksi_raw[fatalities_col].value_counts().head(10).to_dict()
+                        value_counts = (
+                            ksi_raw[fatalities_col].value_counts().head(10).to_dict()
+                        )
                         ksi_fatalities_stats = {
-                            "total_non_null": int(ksi_raw[fatalities_col].notna().sum()),
-                            "unique_values": _convert_to_json_serializable(value_counts),
-                            "sample_values": _convert_to_json_serializable(ksi_raw[fatalities_col].head(10).tolist()),
+                            "total_non_null": int(
+                                ksi_raw[fatalities_col].notna().sum()
+                            ),
+                            "unique_values": _convert_to_json_serializable(
+                                value_counts
+                            ),
+                            "sample_values": _convert_to_json_serializable(
+                                ksi_raw[fatalities_col].head(10).tolist()
+                            ),
                             "data_type": str(ksi_raw[fatalities_col].dtype),
                         }
                     else:
@@ -721,42 +1174,70 @@ def fatality_diagnostic():
                             "sample_values": [],
                             "data_type": "unknown",
                         }
-                    diagnostic_info["ksi_data"]["fatalities_column_stats"] = ksi_fatalities_stats
-                
+                    diagnostic_info["ksi_data"][
+                        "fatalities_column_stats"
+                    ] = ksi_fatalities_stats
+
                 if injury_col in ksi_raw.columns:
-                    fatal_in_injury = ksi_raw[ksi_raw[injury_col].astype(str).str.contains('Fatal', case=False, na=False)]
-                    diagnostic_info["ksi_data"]["fatal_in_injury_count"] = len(fatal_in_injury)
+                    fatal_in_injury = ksi_raw[
+                        ksi_raw[injury_col]
+                        .astype(str)
+                        .str.contains("Fatal", case=False, na=False)
+                    ]
+                    diagnostic_info["ksi_data"]["fatal_in_injury_count"] = len(
+                        fatal_in_injury
+                    )
                     if len(ksi_raw) > 0:
-                        injury_values = ksi_raw[injury_col].value_counts().head(10).to_dict()
-                        diagnostic_info["ksi_data"]["injury_column_unique_values"] = _convert_to_json_serializable(injury_values)
+                        injury_values = (
+                            ksi_raw[injury_col].value_counts().head(10).to_dict()
+                        )
+                        diagnostic_info["ksi_data"]["injury_column_unique_values"] = (
+                            _convert_to_json_serializable(injury_values)
+                        )
                     else:
                         diagnostic_info["ksi_data"]["injury_column_unique_values"] = {}
-                
+
                 # Sample records
                 if fatalities_col in ksi_raw.columns:
-                    sample_fatal = ksi_raw.nlargest(5, fatalities_col) if pd.api.types.is_numeric_dtype(ksi_raw[fatalities_col]) else ksi_raw.head(5)
+                    sample_fatal = (
+                        ksi_raw.nlargest(5, fatalities_col)
+                        if pd.api.types.is_numeric_dtype(ksi_raw[fatalities_col])
+                        else ksi_raw.head(5)
+                    )
                     diagnostic_info["sample_records"]["ksi_with_fatalities"] = [
                         {
-                            "fatalities_col_value": str(record.get(fatalities_col, 'N/A')),
-                            "injury_col_value": str(record.get(injury_col, 'N/A')) if injury_col in record.index else 'N/A',
-                            "columns_with_fatal": [col for col in record.index if 'fatal' in col.lower() or 'death' in col.lower()],
+                            "fatalities_col_value": str(
+                                record.get(fatalities_col, "N/A")
+                            ),
+                            "injury_col_value": (
+                                str(record.get(injury_col, "N/A"))
+                                if injury_col in record.index
+                                else "N/A"
+                            ),
+                            "columns_with_fatal": [
+                                col
+                                for col in record.index
+                                if "fatal" in col.lower() or "death" in col.lower()
+                            ],
                         }
                         for idx, record in sample_fatal.iterrows()
                     ]
-                
+
             except Exception as e:
                 diagnostic_info["ksi_data"]["error"] = str(e)
-                
+
         except Exception as e:
             diagnostic_info["error"] = str(e)
             import traceback
+
             diagnostic_info["traceback"] = traceback.format_exc()
-        
+
         return jsonify(diagnostic_info)
-    
+
     except Exception as e:
         logging.error(f"Error in fatality diagnostic: {e}")
         import traceback
+
         return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
@@ -765,35 +1246,61 @@ def get_model_features():
     """
     Get the list of features/inputs used by the temporal count model
     """
-    if temporal_trainer is None or temporal_trainer.model is None:
+    if not _is_temporal_model_loaded():
         return jsonify({"error": "Temporal model not loaded"}), 500
 
     try:
         feature_columns = getattr(temporal_trainer, "feature_columns", None) or []
 
-        temporal_features = [f for f in feature_columns if any(x in f.lower() for x in ["time", "season", "weekend", "hour", "month", "day"])]
-        road_features = [f for f in feature_columns if any(x in f.lower() for x in ["road", "class", "length", "segment"])]
-        other_features = [f for f in feature_columns if f not in temporal_features and f not in road_features]
+        temporal_features = [
+            f
+            for f in feature_columns
+            if any(
+                x in f.lower()
+                for x in ["time", "season", "weekend", "hour", "month", "day"]
+            )
+        ]
+        road_features = [
+            f
+            for f in feature_columns
+            if any(x in f.lower() for x in ["road", "class", "length", "segment"])
+        ]
+        other_features = [
+            f
+            for f in feature_columns
+            if f not in temporal_features and f not in road_features
+        ]
 
         feature_importance = {}
-        model = temporal_trainer.model
-        if hasattr(model, "feature_importances_") and feature_columns:
+        # Hurdle has stage2; single-stage has model
+        model = getattr(temporal_trainer, "model", None) or getattr(
+            temporal_trainer, "stage2", None
+        )
+        if (
+            model is not None
+            and hasattr(model, "feature_importances_")
+            and feature_columns
+        ):
             importances = model.feature_importances_
             feature_importance = dict(zip(feature_columns, importances.tolist()))
-            feature_importance = dict(sorted(feature_importance.items(), key=lambda x: x[1], reverse=True))
+            feature_importance = dict(
+                sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
+            )
 
-        return jsonify({
-            "total_features": len(feature_columns),
-            "feature_columns": feature_columns,
-            "feature_categories": {
-                "temporal_features": temporal_features,
-                "road_characteristics": road_features,
-                "other_features": other_features,
-            },
-            "feature_importance": feature_importance,
-            "model_type": "temporal_count",
-            "note": "Temporal count model predicts crash rate λ per segment-window. Features come from panel (road, temporal, weather, lag).",
-        })
+        return jsonify(
+            {
+                "total_features": len(feature_columns),
+                "feature_columns": feature_columns,
+                "feature_categories": {
+                    "temporal_features": temporal_features,
+                    "road_characteristics": road_features,
+                    "other_features": other_features,
+                },
+                "feature_importance": feature_importance,
+                "model_type": "temporal_count",
+                "note": "Temporal count model predicts crash rate λ per segment-window. Features come from panel (road, temporal, weather, lag).",
+            }
+        )
     except Exception as e:
         logging.error(f"Error getting model features: {e}")
         import traceback
@@ -813,35 +1320,64 @@ def data_verification():
 
     try:
         data_source = road_network
-        
+
         # Analyze the data relationships
         total_segments = len(data_source)
-        segments_with_crashes = len(data_source[data_source.get("num_total_crashes", 0) > 0]) if "num_total_crashes" in data_source.columns else 0
-        segments_with_ksi = len(data_source[data_source.get("num_ksi_crashes", 0) > 0]) if "num_ksi_crashes" in data_source.columns else 0
-        segments_with_fatalities = len(data_source[data_source.get("fatality_count", 0) > 0]) if "fatality_count" in data_source.columns else 0
-        
+        segments_with_crashes = (
+            len(data_source[data_source.get("num_total_crashes", 0) > 0])
+            if "num_total_crashes" in data_source.columns
+            else 0
+        )
+        segments_with_ksi = (
+            len(data_source[data_source.get("num_ksi_crashes", 0) > 0])
+            if "num_ksi_crashes" in data_source.columns
+            else 0
+        )
+        segments_with_fatalities = (
+            len(data_source[data_source.get("fatality_count", 0) > 0])
+            if "fatality_count" in data_source.columns
+            else 0
+        )
+
         # Calculate totals
-        total_crashes = int(data_source.get("num_total_crashes", 0).sum()) if "num_total_crashes" in data_source.columns else 0
-        total_ksi = int(data_source.get("num_ksi_crashes", 0).sum()) if "num_ksi_crashes" in data_source.columns else 0
-        total_fatalities = int(data_source.get("fatality_count", 0).sum()) if "fatality_count" in data_source.columns else 0
-        
+        total_crashes = (
+            int(data_source.get("num_total_crashes", 0).sum())
+            if "num_total_crashes" in data_source.columns
+            else 0
+        )
+        total_ksi = (
+            int(data_source.get("num_ksi_crashes", 0).sum())
+            if "num_ksi_crashes" in data_source.columns
+            else 0
+        )
+        total_fatalities = (
+            int(data_source.get("fatality_count", 0).sum())
+            if "fatality_count" in data_source.columns
+            else 0
+        )
+
         # Check if fatality counts are likely accurate
         # Based on the diagnostic, we expect:
         # - Collision data: 591 records with non-zero fatalities
-        # - KSI data: 870 records with non-zero fatalities  
+        # - KSI data: 870 records with non-zero fatalities
         # Total should be in the hundreds, not zero
         fatality_accuracy = {
             "total_fatalities_in_data": total_fatalities,
             "segments_with_fatalities": segments_with_fatalities,
             "expected_range": "Hundreds to thousands (based on 591 + 870 raw records)",
             "likely_accurate": total_fatalities > 100,  # Reasonable threshold
-            "warning": "If total_fatalities is 0 or very low (<50), the data needs to be regenerated with the fixed fatality counting logic."
+            "warning": "If total_fatalities is 0 or very low (<50), the data needs to be regenerated with the fixed fatality counting logic.",
         }
-        
+
         # Find segments where KSI > Total crashes (data inconsistency)
         inconsistencies = []
-        if "num_total_crashes" in data_source.columns and "num_ksi_crashes" in data_source.columns:
-            inconsistent = data_source[data_source["num_ksi_crashes"] > data_source["num_total_crashes"]]
+        if (
+            "num_total_crashes" in data_source.columns
+            and "num_ksi_crashes" in data_source.columns
+        ):
+            inconsistent = data_source[
+                data_source["num_ksi_crashes"] > data_source["num_total_crashes"]
+            ]
             inconsistencies = [
                 {
                     "id": str(seg.get("segment_id", idx)),
@@ -851,58 +1387,73 @@ def data_verification():
                 }
                 for idx, seg in inconsistent.head(10).iterrows()
             ]
-        
+
         # Sample segments to analyze
         sample_segments = []
         if "num_total_crashes" in data_source.columns:
             # Get segments with high crash counts but low/no KSI
             high_crash_low_ksi = data_source[
-                (data_source["num_total_crashes"] >= 20) & 
-                (data_source.get("num_ksi_crashes", 0) == 0)
+                (data_source["num_total_crashes"] >= 20)
+                & (data_source.get("num_ksi_crashes", 0) == 0)
             ].head(5)
-            
+
             sample_segments = [
                 {
                     "id": str(seg.get("segment_id", idx)),
                     "street": str(seg.get("LINEAR_NAME", "Unknown")),
                     "total_crashes": int(seg.get("num_total_crashes", 0)),
-                    "ksi_crashes": int(seg.get("num_ksi_crashes", 0)) if "num_ksi_crashes" in data_source.columns else 0,
-                    "fatalities": int(seg.get("fatality_count", 0)) if "fatality_count" in data_source.columns else 0,
+                    "ksi_crashes": (
+                        int(seg.get("num_ksi_crashes", 0))
+                        if "num_ksi_crashes" in data_source.columns
+                        else 0
+                    ),
+                    "fatalities": (
+                        int(seg.get("fatality_count", 0))
+                        if "fatality_count" in data_source.columns
+                        else 0
+                    ),
                 }
                 for idx, seg in high_crash_low_ksi.iterrows()
             ]
-        
-        return jsonify({
-            "summary": {
-                "total_segments": total_segments,
-                "segments_with_crashes": segments_with_crashes,
-                "segments_with_ksi": segments_with_ksi,
-                "total_crashes": total_crashes,
-                "total_ksi_crashes": total_ksi,
-                "total_fatalities": total_fatalities,
-                "segments_with_fatalities": segments_with_fatalities,
-                "ksi_ratio": round(total_ksi / total_crashes * 100, 2) if total_crashes > 0 else 0,
-            },
-            "fatality_accuracy_check": fatality_accuracy,
-            "data_structure_explanation": {
-                "total_crashes_source": "Count of records from collision dataset (all traffic collisions)",
-                "ksi_crashes_source": "Count of records from KSI dataset (crashes with killed/seriously injured persons)",
-                "note": "KSI and collision datasets are counted separately. KSI crashes may overlap with total crashes if they represent the same incidents, or may be separate records. In typical traffic data, KSI crashes are a subset of total crashes.",
-            },
-            "inconsistencies": {
-                "count": len(inconsistencies),
-                "examples": inconsistencies,
-                "note": "These segments have more KSI crashes than total crashes, which may indicate data issues."
-            },
-            "sample_high_crash_low_ksi": {
-                "count": len(sample_segments),
-                "examples": sample_segments,
-                "note": "Sample segments with high crash counts but no KSI crashes."
+
+        return jsonify(
+            {
+                "summary": {
+                    "total_segments": total_segments,
+                    "segments_with_crashes": segments_with_crashes,
+                    "segments_with_ksi": segments_with_ksi,
+                    "total_crashes": total_crashes,
+                    "total_ksi_crashes": total_ksi,
+                    "total_fatalities": total_fatalities,
+                    "segments_with_fatalities": segments_with_fatalities,
+                    "ksi_ratio": (
+                        round(total_ksi / total_crashes * 100, 2)
+                        if total_crashes > 0
+                        else 0
+                    ),
+                },
+                "fatality_accuracy_check": fatality_accuracy,
+                "data_structure_explanation": {
+                    "total_crashes_source": "Count of records from collision dataset (all traffic collisions)",
+                    "ksi_crashes_source": "Count of records from KSI dataset (crashes with killed/seriously injured persons)",
+                    "note": "KSI and collision datasets are counted separately. KSI crashes may overlap with total crashes if they represent the same incidents, or may be separate records. In typical traffic data, KSI crashes are a subset of total crashes.",
+                },
+                "inconsistencies": {
+                    "count": len(inconsistencies),
+                    "examples": inconsistencies,
+                    "note": "These segments have more KSI crashes than total crashes, which may indicate data issues.",
+                },
+                "sample_high_crash_low_ksi": {
+                    "count": len(sample_segments),
+                    "examples": sample_segments,
+                    "note": "Sample segments with high crash counts but no KSI crashes.",
+                },
             }
-        })
+        )
     except Exception as e:
         logging.error(f"Error in data verification: {e}")
         import traceback
+
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -911,38 +1462,40 @@ def data_verification():
 def get_street_names():
     """
     Get street name suggestions for autocomplete
-    
+
     Query parameters:
     - query: search query (required, at least 2 characters)
     - limit: maximum number of results (default: 20, max: 100)
     """
     query = request.args.get("query", "").strip()
-    
+
     if len(query) < 2:
         return jsonify({"suggestions": []})
-    
+
     limit = min(int(request.args.get("limit", 20)), 100)
-    
+
     data_source = road_network
-    
+
     if data_source is None:
         return jsonify({"suggestions": []})
-    
+
     try:
         # Get unique street names matching the query
         if "LINEAR_NAME" in data_source.columns:
             matching_names = data_source[
                 data_source["LINEAR_NAME"].str.contains(query, case=False, na=False)
             ]["LINEAR_NAME"].unique()
-            
+
             # Sort by length (shorter/more exact matches first) then alphabetically
-            matching_names = sorted(matching_names, key=lambda x: (len(x), x.lower()))[:limit]
-            
+            matching_names = sorted(matching_names, key=lambda x: (len(x), x.lower()))[
+                :limit
+            ]
+
             suggestions = [{"name": name, "value": name} for name in matching_names]
             return jsonify({"suggestions": suggestions})
         else:
             return jsonify({"suggestions": []})
-    
+
     except Exception as e:
         logging.error(f"Error in get_street_names: {e}")
         return jsonify({"suggestions": []})
@@ -952,7 +1505,7 @@ def get_street_names():
 def get_all_segments():
     """
     Get all segments with optional filtering and pagination
-    
+
     Query parameters:
     - page: page number (default: 1)
     - per_page: items per page (default: 100, max: 1000)
@@ -963,9 +1516,16 @@ def get_all_segments():
     - sort_order: asc or desc (default: asc)
     """
     data_source = road_network
-    
+
     if data_source is None:
-        return jsonify({"error": "No road data available. Please ensure road network data is loaded."}), 500
+        return (
+            jsonify(
+                {
+                    "error": "No road data available. Please ensure road network data is loaded."
+                }
+            ),
+            500,
+        )
 
     try:
         # Get query parameters
@@ -983,17 +1543,13 @@ def get_all_segments():
         # Apply search filter
         if search:
             filtered_data = filtered_data[
-                filtered_data["LINEAR_NAME"].str.contains(
-                    search, case=False, na=False
-                )
+                filtered_data["LINEAR_NAME"].str.contains(search, case=False, na=False)
             ]
 
         # Apply risk label filter (only if risk_label column exists)
         if risk_label and risk_label in ["low", "medium", "high"]:
             if "risk_label" in filtered_data.columns:
-                filtered_data = filtered_data[
-                    filtered_data["risk_label"] == risk_label
-                ]
+                filtered_data = filtered_data[filtered_data["risk_label"] == risk_label]
 
         # Apply minimum crashes filter (only if column exists)
         if min_crashes:
@@ -1008,7 +1564,7 @@ def get_all_segments():
 
         # Prepare data for sorting
         ascending = sort_order == "asc"
-        
+
         # Validate sort column exists
         if sort_by not in filtered_data.columns:
             # If trying to sort by segment_id but it doesn't exist, try to use index
@@ -1017,7 +1573,9 @@ def get_all_segments():
                 filtered_data = filtered_data.sort_index(ascending=ascending)
             else:
                 # Default to first numeric column or index
-                numeric_cols = filtered_data.select_dtypes(include=[np.number]).columns.tolist()
+                numeric_cols = filtered_data.select_dtypes(
+                    include=[np.number]
+                ).columns.tolist()
                 if numeric_cols:
                     sort_by = numeric_cols[0]
                 else:
@@ -1052,48 +1610,85 @@ def get_all_segments():
             segment_length = segment.get("segment_length", 0)
             if pd.isna(segment_length) or segment_length == 0:
                 try:
-                    if hasattr(segment.geometry, 'length'):
-                        segment_length = segment.geometry.length * 111000  # Approximate meters (rough conversion)
+                    if hasattr(segment.geometry, "length"):
+                        segment_length = (
+                            segment.geometry.length * 111000
+                        )  # Approximate meters (rough conversion)
                 except:
                     segment_length = 0
-            
+
             confidence = segment.get("confidence", None)
             risk_label = "low"
             if (
-                temporal_trainer is not None
-                and temporal_trainer.model is not None
+                _is_temporal_model_loaded()
                 and panel_data is not None
                 and not panel_data.empty
             ):
                 try:
                     if lambda_per_hour_latest is None:
                         _compute_lambda_map_for_latest_window()
-                    seg_id = segment.get("segment_id") or segment.get("CENTRELINE_ID", idx)
+                    seg_id = segment.get("segment_id") or segment.get(
+                        "CENTRELINE_ID", idx
+                    )
                     lam = lambda_per_hour_latest.get(seg_id, 0.0)  # type: ignore[union-attr]
-                    if lam == 0.0 and isinstance(seg_id, float) and not np.isnan(seg_id):
+                    if (
+                        lam == 0.0
+                        and isinstance(seg_id, float)
+                        and not np.isnan(seg_id)
+                    ):
                         lam = lambda_per_hour_latest.get(int(seg_id), 0.0)  # type: ignore[union-attr]
                     risk_label = _lambda_to_risk_label(lam)
                     wh = temporal_trainer.panel_config.window_size_hours or 1  # type: ignore[union-attr]
                     prob_crash = 1.0 - np.exp(-max(0, lam * wh))
                     confidence = float(np.clip(prob_crash, 0.0, 1.0))
                 except Exception as e:
-                    logging.debug(f"Could not compute temporal risk for segment {idx}: {e}")
+                    logging.debug(
+                        f"Could not compute temporal risk for segment {idx}: {e}"
+                    )
                     confidence = 0.5
             else:
-                confidence = float(confidence) if confidence is not None and pd.notna(confidence) else 0.5
+                confidence = (
+                    float(confidence)
+                    if confidence is not None and pd.notna(confidence)
+                    else 0.5
+                )
 
             segment_dict = {
                 "id": str(segment.get("segment_id", idx)),
                 "LINEAR_NAME": str(segment.get("LINEAR_NAME", "Unknown")),
-                "ROAD_CLASS": str(segment.get("ROAD_CLASS", segment.get("LINEAR_NAME_TYPE", "Unknown"))),
+                "ROAD_CLASS": str(
+                    segment.get(
+                        "ROAD_CLASS", segment.get("LINEAR_NAME_TYPE", "Unknown")
+                    )
+                ),
                 "segment_length": float(segment_length),
                 "risk_label": risk_label,
                 "confidence": confidence,
-                "num_total_crashes": int(segment.get("num_total_crashes", 0)) if "num_total_crashes" in segment else 0,
-                "num_ksi_crashes": int(segment.get("num_ksi_crashes", 0)) if "num_ksi_crashes" in segment else 0,
-                "fatality_count": int(segment.get("fatality_count", 0)) if "fatality_count" in segment else 0,
-                "ksi_ratio": float(segment.get("ksi_ratio", 0)) if "ksi_ratio" in segment else 0.0,
-                "crash_density": float(segment.get("crash_density", 0)) if "crash_density" in segment else 0.0,
+                "num_total_crashes": (
+                    int(segment.get("num_total_crashes", 0))
+                    if "num_total_crashes" in segment
+                    else 0
+                ),
+                "num_ksi_crashes": (
+                    int(segment.get("num_ksi_crashes", 0))
+                    if "num_ksi_crashes" in segment
+                    else 0
+                ),
+                "fatality_count": (
+                    int(segment.get("fatality_count", 0))
+                    if "fatality_count" in segment
+                    else 0
+                ),
+                "ksi_ratio": (
+                    float(segment.get("ksi_ratio", 0))
+                    if "ksi_ratio" in segment
+                    else 0.0
+                ),
+                "crash_density": (
+                    float(segment.get("crash_density", 0))
+                    if "crash_density" in segment
+                    else 0.0
+                ),
                 "coordinates": coords,
             }
             results.append(segment_dict)
@@ -2137,4 +2732,4 @@ def _get_data_validation_html():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=False, threaded=False)
