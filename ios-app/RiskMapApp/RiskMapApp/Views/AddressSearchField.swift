@@ -36,8 +36,8 @@ struct AddressSearchField: View {
             .padding()
             .background(Color(UIColor.systemBackground))
 
-            // Suggestions dropdown (only when focused, like feature branch)
-            if isFocused && !completer.suggestions.isEmpty {
+            // Suggestions dropdown — show when we have results (not tied to focus so tap registers before dropdown hides)
+            if !completer.suggestions.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(completer.suggestions.enumerated()), id: \.offset) { index, suggestion in
                         Button {
@@ -79,6 +79,7 @@ struct AddressSearchField: View {
     }
 
     private func selectSuggestion(_ suggestion: MKLocalSearchCompletion) {
+        completer.suggestions = []
         let request = MKLocalSearch.Request(completion: suggestion)
         let search = MKLocalSearch(request: request)
 
@@ -89,7 +90,6 @@ struct AddressSearchField: View {
 
             DispatchQueue.main.async {
                 text = title
-                completer.suggestions = []
                 onCoordinateSelected(coord)
             }
         }

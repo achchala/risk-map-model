@@ -170,11 +170,13 @@ class RiskService: ObservableObject {
         return try JSONDecoder().decode(RiskDefinitionResponse.self, from: data)
     }
 
-    /// Fetch safety-aware routes from backend (fastest vs safer - genuinely different routes from graph-based routing)
+    /// Fetch safety-aware routes from backend (fastest vs safer - genuinely different routes from graph-based routing).
+    /// - Parameter beta: Balance between speed and safety. Higher = more weight on avoiding risk (0.05 speed, 0.1 balanced, 0.25 safety).
     func fetchSafetyAwareRoutes(
         origin: CLLocationCoordinate2D,
         destination: CLLocationCoordinate2D,
-        weather: WeatherData? = nil
+        weather: WeatherData? = nil,
+        beta: Double = 0.1
     ) async throws -> SafetyAwareResponse {
         let urlString = "\(baseURL)/routes/safety-aware"
         guard let url = URL(string: urlString) else { throw APIError.invalidURL }
@@ -182,7 +184,7 @@ class RiskService: ObservableObject {
         var requestBody: [String: Any] = [
             "origin": ["latitude": origin.latitude, "longitude": origin.longitude],
             "destination": ["latitude": destination.latitude, "longitude": destination.longitude],
-            "beta": 0.1
+            "beta": beta
         ]
         if let weather = weather {
             var weatherDict: [String: Any] = ["condition": weather.condition.rawValue]

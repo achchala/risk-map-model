@@ -46,7 +46,7 @@ class RouteService: ObservableObject {
                 saferRoute = backendSafer
             } else {
                 let saferMKRoute = try await withTimeout(seconds: 30) {
-                    try await self.calculateSaferRoute(from: start, to: destination)
+                    try await self.calculateSaferRoute(from: start, to: destination, timePenaltyFactor: self.currentTimePenaltyFactor)
                 }
                 saferRoute = try await withTimeout(seconds: 20) {
                     try await self.analyzeRoute(saferMKRoute, type: .safer)
@@ -66,6 +66,22 @@ class RouteService: ObservableObject {
         }
     }
 
+    private var safetySliderValue: Double {
+        let key = "safetySpeedBalanceSlider"
+        if UserDefaults.standard.object(forKey: key) == nil {
+            return 0.5
+        }
+        return UserDefaults.standard.double(forKey: key)
+    }
+
+    private var currentBeta: Double {
+        SafetySpeedBalance.betaFromSlider(safetySliderValue)
+    }
+
+    private var currentTimePenaltyFactor: Double {
+        SafetySpeedBalance.timePenaltyFromSlider(safetySliderValue)
+    }
+
     /// Fetch safer route from backend (Toronto area). Throws on failure.
     /// Uses MapKit optimal route's effective speed to correct backend's optimistic travel time (free-flow vs real traffic).
     private func fetchBackendSaferRoute(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D, optimalRouteForTimeScaling: Route? = nil) async throws -> Route {
@@ -74,11 +90,13 @@ class RouteService: ObservableObject {
             longitude: (start.longitude + destination.longitude) / 2
         )
         let weather = await weatherService.getWeatherData(for: routeCenter)
+        let beta = currentBeta
 
         let response = try await riskService.fetchSafetyAwareRoutes(
             origin: start,
             destination: destination,
-            weather: weather
+            weather: weather,
+            beta: beta
         )
 
         var estimatedTimeOverride: TimeInterval?
@@ -121,7 +139,7 @@ class RouteService: ObservableObject {
         return route
     }
 
-    private func calculateSaferRoute(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D) async throws -> MKRoute {
+    private func calculateSaferRoute(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D, timePenaltyFactor: Double = 1.0) async throws -> MKRoute {
         let request = MKDirections.Request()
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: start))
         request.destination = MKMapItem(placemark: MKPlacemark(coordinate: destination))
@@ -175,15 +193,19 @@ class RouteService: ObservableObject {
         }
 
         let limitedRiskSegments = Array(riskSegments.prefix(5000))
-        var routeRiskScores: [(route: MKRoute, score: Double)] = []
+        let minTime = routes.map { $0.expectedTravelTime }.min() ?? 1
 
+        var routeScores: [(route: MKRoute, score: Double)] = []
         for route in routes.prefix(5) {
             let riskScore = calculateRouteRiskScore(route: route, riskSegments: limitedRiskSegments)
-            routeRiskScores.append((route: route, score: riskScore))
+            let timeRatio = route.expectedTravelTime / minTime
+            let timePenalty = timePenaltyFactor * max(0, timeRatio - 1.0)
+            let adjustedScore = riskScore + timePenalty
+            routeScores.append((route: route, score: adjustedScore))
         }
 
-        routeRiskScores.sort { $0.score < $1.score }
-        return routeRiskScores.first?.route ?? routes[0]
+        routeScores.sort { $0.score < $1.score }
+        return routeScores.first?.route ?? routes[0]
     }
 
     private func calculateRouteRiskScore(route: MKRoute, riskSegments: [RoadSegment]) -> Double {
