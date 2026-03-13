@@ -26,7 +26,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # model & pipeline imports
 from src.models.model_trainer import TemporalCountModelTrainer, HurdleTemporalTrainer  # type: ignore
-from src.data_processing.data_loader import load_road_network
+from src.data_processing.data_loader import (
+    load_road_network,
+    load_model_dataset,
+    merge_model_dataset_into_road_network,
+)
 from src.data_processing.spatial_join_fast import _ensure_stable_segment_id  # type: ignore
 from src.feature_engineering.panel_builder import PanelConfig  # type: ignore
 from src.routing.road_graph import (  # type: ignore
@@ -116,8 +120,11 @@ try:
     road_network = load_road_network(data_dir)
     logging.info(f"Loaded {len(road_network)} road segments")
 
-    # Ensure stable segment_id and build routing graph + node geometry
+    # Ensure stable segment_id and merge ADT/speed for on-demand inference
     road_network = _ensure_stable_segment_id(road_network)
+    model_dataset = load_model_dataset(data_dir)
+    road_network = merge_model_dataset_into_road_network(road_network, model_dataset)
+
     road_graph = build_road_graph(road_network)
     node_coords = build_node_geometry(road_network)
 
@@ -188,9 +195,12 @@ def _compute_lambda_map_for_latest_window():
     window_size_hours = temporal_trainer.panel_config.window_size_hours  # type: ignore[assignment]
     lambda_per_hour = lambda_window / float(window_size_hours)
 
-    # Map segment_id -> λ_per_hour
+    # Map segment_id -> λ_per_hour (normalize keys to int for consistent lookup with graph)
     segment_ids = current_slice["segment_id"].values
-    lambda_per_hour_latest = dict(zip(segment_ids, lambda_per_hour))
+    lambda_per_hour_latest = {
+        int(sid) if hasattr(sid, "__int__") else sid: float(lam)
+        for sid, lam in zip(segment_ids, lambda_per_hour)
+    }
 
     # Compute percentile thresholds for λ → risk_label mapping (low ≤ p70, medium ≤ p90, high > p90)
     lam_values = np.array(list(lambda_per_hour_latest.values()), dtype=float)
@@ -413,7 +423,7 @@ def health_check():
             "status": "healthy" if road_network is not None else "degraded",
             "temporal_model_loaded": model_ok,
             "road_network_loaded": road_network is not None,
-            "routing_graph_built": road_graph is not None and node_coords is not None,
+            "routing_graph_built": road_graph is not None and bool(node_coords),
             "panel_loaded": panel_ok,
             "road_segments": len(road_network) if road_network is not None else 0,
             "panel_rows": int(len(panel_data)) if panel_ok else 0,
@@ -470,14 +480,15 @@ def get_risk_predictions():
             _get_risk_for_row, axis=1
         )
 
-        if len(segments_in_bbox) > 500:
+        # Cap at 200 segments to avoid MapKit Metal buffer overflow (~50k resource limit)
+        if len(segments_in_bbox) > 200:
             risk_priority = {"high": 3, "medium": 2, "low": 1}
             segments_in_bbox["_risk_priority"] = segments_in_bbox["risk_label"].map(
                 risk_priority
             )
             segments_in_bbox = segments_in_bbox.sort_values(
                 "_risk_priority", ascending=False
-            ).head(500)
+            ).head(200)
 
         results = []
         p70 = _lambda_p70 or 0.0
@@ -736,11 +747,17 @@ def get_safety_aware_route():
         "time_of_day": {"hour": int, "is_weekend": bool} (optional, for risk adjustment)
     }
     """
-    if not _is_temporal_model_loaded() or road_graph is None or node_coords is None:
+    if (
+        not _is_temporal_model_loaded()
+        or road_graph is None
+        or node_coords is None
+        or not node_coords
+    ):
         return (
             jsonify(
                 {
-                    "error": "Temporal model or routing graph not initialized. Check /api/health."
+                    "error": "Temporal model or routing graph not initialized. "
+                    "Road network may lack intersection IDs. Check /api/health."
                 }
             ),
             500,
@@ -791,8 +808,19 @@ def get_safety_aware_route():
         apply_risk_to_edge_costs(road_graph, lam_for_routing, beta_hours_per_expected_crash=beta)  # type: ignore[arg-type]
 
         # Snap origin/destination to nearest graph nodes
-        start_node = snap_to_graph(origin_point, node_coords)  # type: ignore[arg-type]
-        end_node = snap_to_graph(dest_point, node_coords)  # type: ignore[arg-type]
+        try:
+            start_node = snap_to_graph(origin_point, node_coords)  # type: ignore[arg-type]
+            end_node = snap_to_graph(dest_point, node_coords)  # type: ignore[arg-type]
+        except ValueError as e:
+            return (
+                jsonify(
+                    {
+                        "error": str(e),
+                        "hint": "Origin and destination must be within 300m of the road network (Toronto centreline).",
+                    }
+                ),
+                400,
+            )
 
         # Find fastest and safer paths
         fastest_path = find_fastest_route(road_graph, start_node, end_node)  # type: ignore[arg-type]
@@ -826,6 +854,7 @@ def get_safety_aware_route():
                     else 0.0
                 )
                 expected_crashes = float(data.get("expected_crashes", 0.0))
+                risk_label = _lambda_to_risk_label(lam)
                 row = _segment_row_by_id(seg_id)
                 coords = (
                     _extract_coordinates(row.geometry)[:50] if row is not None else []
@@ -846,12 +875,21 @@ def get_safety_aware_route():
                         ),
                         "lambdaPerHour": lam,
                         "expectedCrashes": expected_crashes,
+                        "risk_label": risk_label,
                     }
                 )
             return out
 
+        def _count_risk_labels(segments_list):
+            high = sum(1 for s in segments_list if s.get("risk_label") == "high")
+            medium = sum(1 for s in segments_list if s.get("risk_label") == "medium")
+            low = sum(1 for s in segments_list if s.get("risk_label") == "low")
+            return high, medium, low
+
         fastest_segments_list = _build_segment_list(fastest_edges)
         safer_segments_list = _build_segment_list(safer_edges)
+        fastest_high, fastest_medium, fastest_low = _count_risk_labels(fastest_segments_list)
+        safer_high, safer_medium, safer_low = _count_risk_labels(safer_segments_list)
 
         # Build risk driver explanations for avoided segments with geometry and labels
         avoided_details = []
@@ -903,6 +941,9 @@ def get_safety_aware_route():
                     ),
                     "expectedCrashes": float(fastest_summary["expected_crashes"]),
                     "routeProbability": float(fastest_summary["route_probability"]),
+                    "highRiskSegments": fastest_high,
+                    "mediumRiskSegments": fastest_medium,
+                    "lowRiskSegments": fastest_low,
                 },
             },
             "safer": {
@@ -915,6 +956,9 @@ def get_safety_aware_route():
                     ),
                     "expectedCrashes": float(safer_summary["expected_crashes"]),
                     "routeProbability": float(safer_summary["route_probability"]),
+                    "highRiskSegments": safer_high,
+                    "mediumRiskSegments": safer_medium,
+                    "lowRiskSegments": safer_low,
                 },
             },
             "avoidedSegments": avoided_details,

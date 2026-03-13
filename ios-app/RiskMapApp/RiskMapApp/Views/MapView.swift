@@ -35,7 +35,6 @@ struct MapView: View {
                         let segmentColor = Color(hex: segment.riskLevel.color)
                         MapPolyline(coordinates: coords)
                             .stroke(segmentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
-                        // tappable annotation at segment center (MapPolyline doesn't support tap)
                         Annotation("", coordinate: segment.centerCoordinate) {
                             Button {
                                 selectedSegment = segment

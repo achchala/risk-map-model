@@ -21,6 +21,7 @@
 		A1000049 /* LandingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000050 /* LandingView.swift */; };
 		A1000017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000018 /* Assets.xcassets */; };
 		A1000051 /* AddressSearchField.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000052 /* AddressSearchField.swift */; };
+		A1000053 /* WeatherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000054 /* WeatherService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +41,7 @@
 		A1000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000019 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000052 /* AddressSearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressSearchField.swift; sourceTree = "<group>"; };
+		A1000054 /* WeatherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeatherService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -96,6 +98,7 @@
 			children = (
 				A1000008 /* RiskService.swift */,
 				A1000046 /* RouteService.swift */,
+				A1000054 /* WeatherService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -190,6 +193,7 @@
 				A1000007 /* RiskService.swift in Sources */,
 				A1000009 /* MapView.swift in Sources */,
 				A1000051 /* AddressSearchField.swift in Sources */,
+				A1000053 /* WeatherService.swift in Sources */,
 				A1000043 /* NavigationView.swift in Sources */,
 				A1000045 /* RouteService.swift in Sources */,
 				A1000047 /* HomeView.swift in Sources */,

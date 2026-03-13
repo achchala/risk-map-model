@@ -9,6 +9,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var riskService = RiskService()
+    @StateObject private var weatherService = WeatherService()
     @State private var selectedTab = 0
 
     var body: some View {
@@ -44,6 +45,7 @@ struct ContentView: View {
                 .tag(4)
         }
         .environmentObject(riskService)
+        .environmentObject(weatherService)
     }
 }
 

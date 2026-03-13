@@ -100,10 +100,15 @@ struct RouteSegment: Codable {
     let ROAD_CLASS: String
     let lambdaPerHour: Double
     let expectedCrashes: Double
-    
+    let risk_label: String?
+
     struct Coordinate: Codable, Equatable {
         let latitude: Double
         let longitude: Double
+    }
+
+    var riskLevel: RiskLevel {
+        RiskLevel(rawValue: risk_label ?? "low") ?? .low
     }
 }
 
@@ -111,6 +116,9 @@ struct RouteSummary: Codable {
     let totalTravelTimeHours: Double
     let expectedCrashes: Double
     let routeProbability: Double
+    let highRiskSegments: Int?
+    let mediumRiskSegments: Int?
+    let lowRiskSegments: Int?
 }
 
 struct RouteOption: Codable {
@@ -118,6 +126,24 @@ struct RouteOption: Codable {
     let segmentIds: [Int]
     let segments: [RouteSegment]
     let summary: RouteSummary
+
+    /// Flattened coordinates for the full route (one polyline instead of per-segment).
+    var fullRouteCoordinates: [CLLocationCoordinate2D] {
+        var result: [CLLocationCoordinate2D] = []
+        for seg in segments {
+            let coords = seg.coordinates.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+            guard !coords.isEmpty else { continue }
+            if result.isEmpty {
+                result = coords
+            } else {
+                let last = result.last!
+                let first = coords[0]
+                let same = abs(last.latitude - first.latitude) < 1e-9 && abs(last.longitude - first.longitude) < 1e-9
+                result.append(contentsOf: same ? Array(coords.dropFirst()) : coords)
+            }
+        }
+        return result.filter { $0.latitude.isFinite && $0.longitude.isFinite }
+    }
 }
 
 struct AvoidedSegment: Codable, Identifiable, Equatable {

@@ -20,7 +20,7 @@ import logging
 import geopandas as gpd
 import networkx as nx
 import numpy as np
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, MultiLineString, Point
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +98,26 @@ def build_road_graph(road_network: gpd.GeoDataFrame) -> nx.DiGraph:
         segment_id = seg["CENTRELINE_ID"]
         length_m = float(seg["segment_length"])
         road_class = seg.get("ROAD_CLASS", "unknown")
-        geometry = seg.geometry
+        geom = seg.geometry
 
-        if not isinstance(geometry, LineString):
-            # Skip non-line geometry; routing expects edges to be lines
+        if isinstance(geom, LineString):
+            geometry = geom
+        elif isinstance(geom, MultiLineString) and len(geom.geoms) > 0:
+            # Merge all parts into one LineString for routing
+            coords = []
+            for g in geom.geoms:
+                coords.extend(list(g.coords))
+            if len(coords) < 2:
+                continue
+            geometry = LineString(coords)
+        else:
+            continue
+
+        # Skip segments with invalid intersection IDs
+        try:
+            if from_node is None or to_node is None or np.isnan(from_node) or np.isnan(to_node):
+                continue
+        except (TypeError, ValueError):
             continue
 
         t_hours = estimate_travel_time_hours(length_m, str(road_class))
@@ -161,10 +177,25 @@ def apply_risk_to_edge_costs(
         - expected_crashes
         - risk_weight_hours
     """
+    def _get_lam(seg_id, lam_dict):
+        """Look up lambda with type normalization (int/np.int64/float key mismatch)."""
+        if seg_id is None:
+            return 0.0
+        v = lam_dict.get(seg_id, None)
+        if v is not None:
+            return float(v)
+        try:
+            v = lam_dict.get(int(seg_id), None)
+            if v is not None:
+                return float(v)
+        except (ValueError, TypeError):
+            pass
+        return 0.0
+
     for u, v, data in G.edges(data=True):
         seg_id = data.get("segment_id")
         travel_time = float(data.get("travel_time_hours", 0.0))
-        lam = float(lambda_per_hour.get(seg_id, 0.0))
+        lam = _get_lam(seg_id, lambda_per_hour)
 
         expected_crashes = lam * travel_time  # dimensionless expected count
         data["expected_crashes"] = expected_crashes
@@ -258,14 +289,24 @@ def build_node_geometry(road_network: gpd.GeoDataFrame) -> Dict[Hashable, Point]
 
     for _, seg in roads_geo.iterrows():
         geom = seg.geometry
-        if not isinstance(geom, LineString):
+        if isinstance(geom, LineString):
+            start_pt = Point(geom.coords[0])
+            end_pt = Point(geom.coords[-1])
+        elif isinstance(geom, MultiLineString) and len(geom.geoms) > 0:
+            first_line = geom.geoms[0]
+            last_line = geom.geoms[-1]
+            start_pt = Point(first_line.coords[0])
+            end_pt = Point(last_line.coords[-1])
+        else:
             continue
 
         from_node = seg["FROM_INTERSECTION_ID"]
         to_node = seg["TO_INTERSECTION_ID"]
-
-        start_pt = Point(geom.coords[0])
-        end_pt = Point(geom.coords[-1])
+        try:
+            if from_node is None or to_node is None or np.isnan(from_node) or np.isnan(to_node):
+                continue
+        except (TypeError, ValueError):
+            continue
 
         # First segment to define a node wins; they should be very close anyway.
         if from_node not in node_coords:
@@ -280,7 +321,7 @@ def build_node_geometry(road_network: gpd.GeoDataFrame) -> Dict[Hashable, Point]
 def snap_to_graph(
     user_point: Point,
     node_coords: Dict[Hashable, Point],
-    max_distance_m: float = 100.0,
+    max_distance_m: float = 300.0,
 ) -> Hashable:
     """
     Snap a user location to the nearest graph node within a maximum distance.
