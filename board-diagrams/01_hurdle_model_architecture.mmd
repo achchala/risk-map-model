@@ -1,0 +1,37 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#D6EAF8', 'primaryBorderColor': '#2C5F8A', 'secondaryColor': '#D5F5E3', 'tertiaryColor': '#FCF3CF', 'lineColor': '#2C5F8A', 'fontFamily': 'Helvetica Neue, sans-serif'}}}%%
+flowchart LR
+    subgraph Input
+        Features["**Input Features**\n───────────\nWeather\nRoad Geometry\nTMC Exposure\nSchool / Transit\nLag Features\nHistorical Profiles\nTemporal Indicators"]
+    end
+
+    Scaler["**Standard Scaler**"]
+
+    subgraph Stage1["Stage 1: Binary Classifier"]
+        S1["HistGradientBoostingClassifier\nloss=log_loss, depth=6\nlr=0.1, 300 iterations"]
+    end
+
+    subgraph Stage2["Stage 2: Count Regressor"]
+        S2["HistGradientBoostingRegressor\nloss=poisson, depth=6\nlr=0.1, 300 iterations\n(positive windows only)"]
+    end
+
+    Calib["**Isotonic Calibration**"]
+
+    Combine["**Combined Prediction**\n───────────────\nλ = P_cal × E[n|crash]\nclipped to [0, 50]"]
+
+    Risk["**Risk Label**\n──────────\n🟢 Low ≤ p70\n🟡 Med p70–p90\n🔴 High > p90"]
+
+    Features --> Scaler
+    Scaler --> S1
+    Scaler --> S2
+    S1 -- "P(crash)" --> Calib
+    Calib -- "P_cal(crash)" --> Combine
+    S2 -- "E[count|crash]" --> Combine
+    Combine -- "λ" --> Risk
+
+    style Features fill:#E8EEF4,stroke:#2C5F8A,stroke-width:2px
+    style Scaler fill:#F5F5F5,stroke:#3A9CA0,stroke-width:2px
+    style S1 fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style S2 fill:#D5F5E3,stroke:#2E8B57,stroke-width:2px
+    style Calib fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style Combine fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style Risk fill:#F5F5F5,stroke:#DC143C,stroke-width:2px

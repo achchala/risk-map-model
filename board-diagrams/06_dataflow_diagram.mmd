@@ -1,0 +1,103 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#D6EAF8', 'primaryBorderColor': '#2C5F8A', 'lineColor': '#2C5F8A', 'fontFamily': 'Helvetica Neue, sans-serif'}}}%%
+flowchart LR
+
+    %% ── External Entities ──
+    TorontoPolice(["🏛 Toronto Police\nCollisions Excel\n618K records"])
+    KSIData(["🏛 KSI Dataset\nCSV · 18K records"])
+    RoadNetwork(["🏛 Centreline\nGeoJSON · 65K segs"])
+    NOAA(["☁ NOAA\nWeather API"])
+    TMC(["🚗 TMC\nTraffic Volumes"])
+    SchoolDB(["🏫 School\nLocations"])
+    GTFS(["🚌 TTC GTFS\nTransit Freq"])
+    iOSApp(["📱 iOS App\nClient"])
+    DevTools(["🖥 Developer\nDashboard"])
+
+    %% ── Data Stores ──
+    DS1[("D1: Raw Collision\nRecords")]
+    DS2[("D2: Road Segment\nGeometry")]
+    DS3[("D3: Enriched Panel\nDataset")]
+    DS4[("D4: Trained Model\nArtifacts (.pkl)")]
+    DS5[("D5: Lambda Risk Map\n(segment → λ)")]
+    DS6[("D6: Road Graph\n(NetworkX)")]
+
+    %% ── Processes ──
+    P1["1.0\nData Loader\n& Cleaning"]
+    P2["2.0\nSpatial Join\n(BallTree · 20m)"]
+    P3["3.0\nPanel Builder\n& Feature Eng"]
+    P4["4.0\nHurdle Model\nTrain / Calibrate"]
+    P5["5.0\nInference\nλ = Pcal × E[n|crash]"]
+    P6["6.0\nRisk Labelling\np70 / p90 thresholds"]
+    P7["7.0\nFlask API\nServing Layer"]
+    P8["8.0\nDijkstra Router\ntime + β·risk"]
+
+    %% ── Data Flows: Ingestion ──
+    TorontoPolice -- "collision records" --> P1
+    KSIData -- "KSI records" --> P1
+    RoadNetwork -- "road segments" --> P1
+    P1 -- "cleaned collisions" --> DS1
+    P1 -- "road geometry" --> DS2
+
+    %% ── Data Flows: Enrichment & Spatial Join ──
+    DS1 -- "crash events" --> P2
+    DS2 -- "segments + centreline IDs" --> P2
+    NOAA -- "temp, precip, snow, wind" --> P2
+    TMC -- "ped / vehicle volumes" --> P2
+    SchoolDB -- "school zone flags" --> P2
+    GTFS -- "transit frequency" --> P2
+
+    %% ── Data Flows: Feature Engineering ──
+    P2 -- "crash-segment pairs\n+ enrichment cols" --> P3
+    P3 -- "feature matrix\n(7 groups, 40+ cols)" --> DS3
+    DS3 -- "train / val / test\npanels" --> P4
+
+    %% ── Data Flows: Training ──
+    P4 -- "binary classifier +\nPoisson regressor +\nisotonic calibrator" --> DS4
+
+    %% ── Data Flows: Inference ──
+    DS4 -- "model weights" --> P5
+    DS3 -- "latest window\nfeatures" --> P5
+    P5 -- "λ per segment" --> DS5
+    DS5 -- "lambda values" --> P6
+    P6 -- "Low / Med / High\nlabels" --> P7
+
+    %% ── Data Flows: Routing ──
+    DS2 -- "segment geometry\n+ road class" --> DS6
+    DS5 -- "risk weights" --> P8
+    DS6 -- "graph topology" --> P8
+    P8 -- "route GeoJSON\n+ risk stats" --> P7
+
+    %% ── Data Flows: API → Consumers ──
+    iOSApp -- "POST /risk-predictions\n(bounding box)" --> P7
+    iOSApp -- "POST /risk-prediction\n(lat, lon)" --> P7
+    iOSApp -- "POST /routes/safety-aware\n(origin, dest)" --> P7
+    P7 -- "segments + risk\nGeoJSON" --> iOSApp
+    P7 -- "route + risk stats" --> iOSApp
+    DevTools -- "GET /api/health\n/model-features\n/data-verification" --> P7
+    P7 -- "diagnostics JSON" --> DevTools
+
+    %% ── Styles ──
+    style TorontoPolice fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style KSIData fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style RoadNetwork fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style NOAA fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style TMC fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style SchoolDB fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style GTFS fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style iOSApp fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style DevTools fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+
+    style DS1 fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style DS2 fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style DS3 fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style DS4 fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style DS5 fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style DS6 fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+
+    style P1 fill:#E8DAEF,stroke:#2C5F8A,stroke-width:2px
+    style P2 fill:#E8DAEF,stroke:#2C5F8A,stroke-width:2px
+    style P3 fill:#E8DAEF,stroke:#2C5F8A,stroke-width:2px
+    style P4 fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style P5 fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style P6 fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style P7 fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style P8 fill:#E8DAEF,stroke:#2C5F8A,stroke-width:2px
