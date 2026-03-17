@@ -14,11 +14,13 @@ class RiskService: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     
-    // backend API URL - update this to your Mac's IP address when testing on device
-    // for iOS Simulator, use localhost. For physical device, use your Mac's IP
+    // Backend API URL: Simulator uses localhost; device must use your Mac's IP on the same Wi‑Fi.
+    #if targetEnvironment(simulator)
     private let baseURL = "http://localhost:8000/api"
-    // For Simulator: "http://localhost:8000/api"
-    // For Device: "http://10.10.11.47:8000/api" (update IP if needed)
+    #else
+    // Your Mac's IP for device testing (same Wi‑Fi as iPhone)
+    private let baseURL = "http://10.36.143.251:8000/api"
+    #endif
     
     /// Parse backend JSON error body: { "error": "message" }
     private static func parseServerError(from data: Data) -> String? {
@@ -103,9 +105,24 @@ class RiskService: ObservableObject {
                 self.isLoading = false
             }
             throw APIError.decodingError
-        } catch let urlError as URLError where urlError.code == .cannotConnectToHost {
+        } catch let urlError as URLError {
+            let hint: String
+            switch urlError.code {
+            case .cannotConnectToHost, .cannotFindHost:
+                #if targetEnvironment(simulator)
+                hint = "Backend not running. Start it: cd backend-api && python app.py"
+                #else
+                hint = "Cannot reach backend. Check: (1) Backend running on Mac? (2) iPhone and Mac on same Wi‑Fi? (3) Mac IP in RiskService.swift still correct? (Run: ipconfig getifaddr en0)"
+                #endif
+            case .notConnectedToInternet, .networkConnectionLost:
+                hint = "No network. Use Wi‑Fi (same network as your Mac) for device testing."
+            case .timedOut:
+                hint = "Request timed out. Is the backend running and reachable at the configured IP?"
+            default:
+                hint = urlError.localizedDescription
+            }
             await MainActor.run {
-                self.errorMessage = "Backend not running. Start it: cd backend-api && python app.py"
+                self.errorMessage = hint
                 self.isLoading = false
             }
             throw APIError.networkError(urlError)

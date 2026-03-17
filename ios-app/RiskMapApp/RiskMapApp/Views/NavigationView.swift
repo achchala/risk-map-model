@@ -424,20 +424,47 @@ struct RouteNavigationView: View {
         let destItem = MKMapItem(placemark: MKPlacemark(coordinate: dest))
         destItem.name = destination.isEmpty ? "Destination" : destination
 
-        let steps = route.steps
+        // Apple Maps routing often fails with "Directions Not Available" when given too many stops.
+        // Use at most 10 waypoints so directions are returned reliably (start + 10 + destination = 12 total).
+        let maxWaypoints = 10
         var mapItems: [MKMapItem] = [startItem]
-        let maxWaypoints = 23
-        let stepInterval = max(1, steps.count / maxWaypoints)
 
-        for (index, step) in steps.enumerated() {
-            if index > 0 && index < steps.count - 1 && index % stepInterval == 0 {
-                let coords = step.polyline.coordinates
-                if let first = coords.first {
-                    let waypoint = MKMapItem(placemark: MKPlacemark(coordinate: first))
-                    mapItems.append(waypoint)
+        let steps = route.steps
+        if !steps.isEmpty {
+            let stepInterval = max(1, steps.count / maxWaypoints)
+            var stopNumber = 1
+            for (index, step) in steps.enumerated() {
+                if index > 0 && index < steps.count - 1 && index % stepInterval == 0 {
+                    let coords = step.polyline.coordinates
+                    if let first = coords.first {
+                        let item = MKMapItem(placemark: MKPlacemark(coordinate: first))
+                        item.name = "Stop \(stopNumber)"
+                        mapItems.append(item)
+                        stopNumber += 1
+                    }
+                }
+            }
+        } else {
+            // Backend route: no MKRoute.steps — sample waypoints from polyline so Apple Maps follows the route
+            let coords = route.polyline.coordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite }
+            guard coords.count >= 2 else {
+                mapItems.append(destItem)
+                MKMapItem.openMaps(with: mapItems, launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
+                return
+            }
+            let n = min(maxWaypoints, coords.count - 2)
+            if n > 0 {
+                let step = Double(coords.count - 1) / Double(n + 1)
+                for i in 1...n {
+                    let idx = Int(round(step * Double(i)))
+                    guard idx > 0 && idx < coords.count else { continue }
+                    let item = MKMapItem(placemark: MKPlacemark(coordinate: coords[idx]))
+                    item.name = "Stop \(mapItems.count)"
+                    mapItems.append(item)
                 }
             }
         }
+
         mapItems.append(destItem)
 
         MKMapItem.openMaps(
@@ -448,19 +475,34 @@ struct RouteNavigationView: View {
 
     private func exportToGoogleMaps(route: Route) {
         guard let start = startCoordinate, let dest = destinationCoordinate else { return }
-        let steps = route.steps
-        var waypoints: [String] = []
         let maxWaypoints = 23
-        let stepInterval = max(1, steps.count / maxWaypoints)
+        var waypoints: [String] = []
 
-        for (index, step) in steps.enumerated() {
-            if index > 0 && index < steps.count - 1 && index % stepInterval == 0 {
-                let coords = step.polyline.coordinates
-                if let first = coords.first {
-                    waypoints.append("\(first.latitude),\(first.longitude)")
+        let steps = route.steps
+        if !steps.isEmpty {
+            let stepInterval = max(1, steps.count / maxWaypoints)
+            for (index, step) in steps.enumerated() {
+                if index > 0 && index < steps.count - 1 && index % stepInterval == 0 {
+                    let coords = step.polyline.coordinates
+                    if let first = coords.first {
+                        waypoints.append("\(first.latitude),\(first.longitude)")
+                    }
+                }
+            }
+        } else {
+            // Backend route: sample waypoints from polyline
+            let coords = route.polyline.coordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite }
+            if coords.count >= 3 {
+                let n = min(maxWaypoints, coords.count - 2)
+                let step = Double(coords.count - 1) / Double(n + 1)
+                for i in 1...n {
+                    let idx = Int(round(step * Double(i)))
+                    guard idx > 0 && idx < coords.count else { continue }
+                    waypoints.append("\(coords[idx].latitude),\(coords[idx].longitude)")
                 }
             }
         }
+
         let limited = Array(waypoints.prefix(maxWaypoints))
         var url = "https://www.google.com/maps/dir/?api=1&origin=\(start.latitude),\(start.longitude)&destination=\(dest.latitude),\(dest.longitude)&travelmode=driving"
         if !limited.isEmpty {

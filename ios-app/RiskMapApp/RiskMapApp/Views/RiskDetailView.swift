@@ -6,15 +6,66 @@
 //
 
 import SwiftUI
+import MapKit
 
 struct RiskDetailView: View {
     let segment: RoadSegment
     @Environment(\.dismiss) var dismiss
+    @State private var cameraPosition: MapCameraPosition
+
+    init(segment: RoadSegment) {
+        self.segment = segment
+        let coords = segment.coordinates.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+        let validCoords = coords.filter { $0.latitude.isFinite && $0.longitude.isFinite && $0.latitude >= -90 && $0.latitude <= 90 && $0.longitude >= -180 && $0.longitude <= 180 }
+        if validCoords.isEmpty {
+            _cameraPosition = State(initialValue: .region(MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 43.6532, longitude: -79.3832),
+                span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+            )))
+        } else {
+            let minLat = validCoords.map(\.latitude).min()!
+            let maxLat = validCoords.map(\.latitude).max()!
+            let minLon = validCoords.map(\.longitude).min()!
+            let maxLon = validCoords.map(\.longitude).max()!
+            let pad: CLLocationDegrees = 0.0015
+            let region = MKCoordinateRegion(
+                center: CLLocationCoordinate2D(
+                    latitude: (minLat + maxLat) / 2,
+                    longitude: (minLon + maxLon) / 2
+                ),
+                span: MKCoordinateSpan(
+                    latitudeDelta: max(maxLat - minLat + pad * 2, 0.003),
+                    longitudeDelta: max(maxLon - minLon + pad * 2, 0.003)
+                )
+            )
+            _cameraPosition = State(initialValue: .region(region))
+        }
+    }
+
+    private var segmentCoordinates: [CLLocationCoordinate2D] {
+        segment.coordinates
+            .map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+            .filter { $0.latitude.isFinite && $0.longitude.isFinite }
+    }
 
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    // Map showing exact segment
+                    if !segmentCoordinates.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Location")
+                                .font(.headline)
+                            Map(position: $cameraPosition, interactionModes: [.pan, .zoom]) {
+                                MapPolyline(coordinates: segmentCoordinates)
+                                    .stroke(Color(hex: segment.riskLevel.color), style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
+                            }
+                            .frame(height: 180)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+
                     // Header: road name + location
                     VStack(alignment: .leading, spacing: 8) {
                         Text(segment.linearName)
