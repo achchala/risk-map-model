@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # model & pipeline imports
-from src.models.model_trainer import TemporalCountModelTrainer  # type: ignore
+from src.models.temporal_count import TemporalCountModelTrainer  # type: ignore
 from src.data_processing.data_loader import load_road_network
 from src.data_processing.spatial_join_fast import _ensure_stable_segment_id  # type: ignore
 from src.feature_engineering.panel_builder import PanelConfig  # type: ignore
