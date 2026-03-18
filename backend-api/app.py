@@ -6,6 +6,14 @@ serves risk predictions from the trained model
 # Reduce chance of double-free in numpy/OpenBLAS/MKL (set before any numeric imports)
 import os
 
+# Ensure a usable temp dir (scipy/sklearn need it). Fixes "No usable temporary directory" on some systems.
+_fallback_tmp = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp"))
+os.makedirs(_fallback_tmp, exist_ok=True)
+# Always set TMPDIR/TMP/TEMP so scipy/sklearn use a known-writable dir
+os.environ["TMPDIR"] = _fallback_tmp
+os.environ["TMP"] = _fallback_tmp
+os.environ["TEMP"] = _fallback_tmp
+
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
@@ -229,10 +237,33 @@ if (
         logging.warning(f"Could not compute lambda map at startup: {e}")
 
 
+def _get_feature_importance_map():
+    """
+    Get feature importance from the loaded model for ranking risk drivers.
+    Hurdle: uses stage2 (count regressor); single-stage: uses model.
+    Returns dict of feature_name -> importance, or empty dict if unavailable.
+    """
+    if not _is_temporal_model_loaded() or temporal_trainer is None:
+        return {}
+    model = getattr(temporal_trainer, "model", None) or getattr(
+        temporal_trainer, "stage2", None
+    )
+    feature_columns = getattr(temporal_trainer, "feature_columns", None) or []
+    if (
+        model is not None
+        and hasattr(model, "feature_importances_")
+        and feature_columns
+        and len(model.feature_importances_) == len(feature_columns)
+    ):
+        return dict(zip(feature_columns, model.feature_importances_.tolist()))
+    return {}
+
+
 def _get_risk_driver_features_for_segment(segment_id):
     """
-    Extract a compact set of 'risk driver' features for a segment
-    from the latest panel window (time-of-day, season, history, weather).
+    Extract risk driver features for a segment from the latest panel window.
+    Uses temporal_trainer.feature_columns when available (model-aligned);
+    otherwise falls back to a legacy key list.
     """
     if panel_data is None or panel_data.empty or latest_window_start is None:
         return {}
@@ -245,49 +276,46 @@ def _get_risk_driver_features_for_segment(segment_id):
         return {}
 
     row = row.iloc[0]
-    keys = [
-        "is_oneway",
-        "from_intersection_degree",
-        "to_intersection_degree",
-        "segment_length",
-        "day_of_week",
-        "is_weekend",
-        "month",
-        "datetime_hour",
-        "crashes_1d_ago",
-        "crashes_7d_ago",
-        "crashes_30d_ago",
-        "rolling_mean_7d",
-        "rolling_max_7d",
-        "hist_crashes_per_year",
-        "hist_crash_hour_ratio",
-        "hist_crash_weekend_ratio",
-        "hour_of_day",
-        "crashes_1_week_ago",
-        "crashes_2_weeks_ago",
-        "crashes_4_weeks_ago",
-        "rolling_mean_4_weeks",
-        "rolling_max_4_weeks",
-        "past_crash_count_1h",
-        "past_crash_count_24h",
-        "past_crash_count_7d",
-        "rolling_mean_24h",
-        "rolling_max_24h",
-        "rolling_mean_7d",
-        "rolling_max_30d",
-        "temperature",
-        "precipitation",
-        "snow_mm",
-        "visibility",
-        "wind_speed",
-        "weather_condition",
-        "is_missing_weather",
-    ]
+
+    # Derive keys from model's feature_columns when available
+    feature_columns = getattr(temporal_trainer, "feature_columns", None) if temporal_trainer else None
+    if feature_columns:
+        keys = list(feature_columns)
+    else:
+        # Fallback when model not loaded
+        keys = [
+            "is_oneway",
+            "from_intersection_degree",
+            "to_intersection_degree",
+            "segment_length",
+            "day_of_week",
+            "is_weekend",
+            "month",
+            "datetime_hour",
+            "crashes_1d_ago",
+            "crashes_7d_ago",
+            "crashes_30d_ago",
+            "rolling_mean_7d",
+            "rolling_max_7d",
+            "hist_crashes_per_year",
+            "hist_crash_hour_ratio",
+            "hist_crash_weekend_ratio",
+            "temperature",
+            "precipitation",
+            "snow_depth_mm",
+            "wind_speed",
+            "is_freezing",
+            "is_precip",
+            "is_missing_weather",
+        ]
+
     drivers = {}
     for k in keys:
-        if k not in row.index:
+        # Handle snow_mm alias (legacy panel column name)
+        col = k if k in row.index else ("snow_mm" if k == "snow_depth_mm" else k)
+        if col not in row.index:
             continue
-        val = row[k]
+        val = row[col]
         try:
             if isinstance(val, (np.integer, np.int64, np.int32)):
                 v = float(int(val))
@@ -305,42 +333,119 @@ def _get_risk_driver_features_for_segment(segment_id):
 
 
 _FEATURE_LABELS = {
+    # Lag / history
     "crashes_1d_ago": "Crashes in last 24h",
     "crashes_7d_ago": "Crashes in last 7 days",
     "crashes_30d_ago": "Crashes in last 30 days",
     "rolling_mean_7d": "7-day rolling crash average",
     "rolling_max_7d": "7-day rolling crash peak",
+    "rolling_mean_4_weeks": "4-week rolling crash average",
+    "rolling_max_4_weeks": "4-week rolling crash peak",
+    "rolling_mean_24h": "24h rolling crash average",
+    "rolling_max_24h": "24h rolling crash peak",
+    "rolling_max_30d": "30-day rolling crash peak",
+    "crashes_1_week_ago": "Crashes 1 week ago",
+    "crashes_2_weeks_ago": "Crashes 2 weeks ago",
+    "crashes_4_weeks_ago": "Crashes 4 weeks ago",
+    "past_crash_count_1h": "Crashes in last hour",
+    "past_crash_count_24h": "Crashes in last 24h",
+    "past_crash_count_7d": "Crashes in last 7 days",
     "hist_crashes_per_year": "Historical crashes per year",
     "hist_crash_hour_ratio": "Crash rate by hour pattern",
     "hist_crash_weekend_ratio": "Weekend crash rate",
+    # Geometry
     "from_intersection_degree": "Intersection complexity (from)",
     "to_intersection_degree": "Intersection complexity (to)",
     "segment_length": "Segment length",
+    "is_oneway": "One-way road",
+    # Temporal
     "day_of_week": "Day of week",
     "is_weekend": "Weekend",
     "month": "Month",
     "datetime_hour": "Hour of day",
+    "hour_of_day": "Hour of day",
+    "month_sin": "Monthly seasonality",
+    "month_cos": "Monthly seasonality",
+    "season_int": "Season",
+    "dow_sin": "Day-of-week pattern",
+    "dow_cos": "Day-of-week pattern",
+    # Traffic / ADT
+    "avg_daily_vol": "Daily traffic volume",
+    "avg_speed": "Average speed",
+    "avg_85th_percentile_speed": "85th percentile speed",
+    "avg_95th_percentile_speed": "95th percentile speed",
+    "exposure": "Traffic exposure",
+    "avg_wkdy_am_peak_vol": "AM peak volume",
+    "avg_wkdy_pm_peak_vol": "PM peak volume",
+    "avg_heavy_pct": "Heavy vehicle share",
+    "log_volume": "Log traffic volume",
+    # TMC exposure
+    "tmc_daily_ped_vol": "Pedestrian volume",
+    "tmc_daily_cyclist_vol": "Cyclist volume",
+    "tmc_daily_vehicle_vol": "Vehicle volume (TMC)",
+    # Context
+    "is_school_zone": "School zone",
+    "nearby_transit_frequency": "Transit frequency",
+    "is_school_active_hour": "School active hours",
+    # Weather
+    "temperature": "Temperature",
+    "precipitation": "Precipitation",
+    "snow_depth_mm": "Snow depth",
+    "snow_mm": "Snow depth",
+    "wind_speed": "Wind speed",
+    "is_freezing": "Freezing conditions",
+    "is_precip": "Precipitation present",
+    "is_missing_weather": "Missing weather data",
+    "visibility": "Visibility",
+    "weather_condition": "Weather condition",
 }
 
 
+def _road_class_label(col: str) -> str:
+    """Convert road_class_X to human-readable label."""
+    if col.startswith("road_class_"):
+        name = col.replace("road_class_", "").replace("_", " ")
+        return f"Road class: {name}"
+    return col.replace("_", " ").title()
+
+
 def _build_risk_explanation(drivers: dict, risk_label: str) -> str:
-    """Build human-readable paragraph explaining which factors contributed to risk."""
+    """
+    Build human-readable paragraph explaining which factors contributed to risk.
+    Ranks factors by model feature importance when available; otherwise by magnitude.
+    """
     risk_text = risk_label.replace("_", " ").title()
     if not drivers:
         return (
             f"This segment is rated {risk_text} risk based on the predicted crash rate (λ) "
             "for this segment."
         )
+
+    importance_map = _get_feature_importance_map()
+
+    def sort_key(item):
+        k, v = item
+        imp = importance_map.get(k, 0.0)
+        if imp > 0:
+            return -imp  # higher importance first
+        if isinstance(v, (int, float)) and v == v:
+            return -abs(v)  # fallback: magnitude
+        return 0
+
+    sorted_items = sorted(drivers.items(), key=sort_key)
+
     parts = []
-    for k, v in sorted(
-        drivers.items(),
-        key=lambda x: -abs(x[1]) if isinstance(x[1], (int, float)) else 0,
-    ):
+    for k, v in sorted_items:
         if v is None or (isinstance(v, (int, float)) and v == 0):
             continue
-        label = _FEATURE_LABELS.get(k, k.replace("_", " ").title())
+        if k.startswith("road_class_") and isinstance(v, (int, float)) and v == 1:
+            label = _road_class_label(k)
+        else:
+            label = _FEATURE_LABELS.get(k, _road_class_label(k) if k.startswith("road_class_") else k.replace("_", " ").title())
         if isinstance(v, (int, float)):
-            if "crash" in k.lower() or "hist" in k.lower():
+            if k.startswith("road_class_") and v == 1:
+                parts.append(label)
+            elif "crash" in k.lower() or "hist" in k.lower():
                 parts.append(
                     f"{label} ({v:.1f})" if isinstance(v, float) else f"{label} ({v})"
                 )
@@ -351,6 +456,10 @@ def _build_risk_explanation(drivers: dict, risk_label: str) -> str:
             elif "length" in k:
                 parts.append(
                     f"{label} ({v:.1f}m)" if isinstance(v, float) else f"{label} ({v}m)"
+                )
+            elif "vol" in k or "volume" in k.lower() or "speed" in k.lower():
+                parts.append(
+                    f"{label} ({v:,.0f})" if v >= 100 else f"{label} ({v:.1f})"
                 )
             else:
                 parts.append(
@@ -983,19 +1092,21 @@ def get_risk_definition():
     """
     if _lambda_p70 is None or _lambda_p90 is None:
         return jsonify({"error": "Risk thresholds not available"}), 503
-    return jsonify(
-        {
-            "p70": float(_lambda_p70),
-            "p90": float(_lambda_p90),
-            "description": (
-                "Risk is based on predicted crash rate (λ) per segment. "
-                "Low = bottom 70% of segments, Medium = 70th–90th percentile, High = top 10%."
-            ),
-            "low": "Bottom 70% of segments by predicted crash rate",
-            "medium": "70th–90th percentile",
-            "high": "Top 10% of segments by predicted crash rate",
-        }
-    )
+    resp = {
+        "p70": float(_lambda_p70),
+        "p90": float(_lambda_p90),
+        "description": (
+            "Risk is based on predicted crash rate (λ) per segment. "
+            "Low = bottom 70% of segments, Medium = 70th–90th percentile, High = top 10%."
+        ),
+        "low": "Bottom 70% of segments by predicted crash rate",
+        "medium": "70th–90th percentile",
+        "high": "Top 10% of segments by predicted crash rate",
+    }
+    importance = _get_feature_importance_map()
+    if importance:
+        resp["featureImportance"] = importance
+    return jsonify(resp)
 
 
 @app.route("/data-validation", methods=["GET"])

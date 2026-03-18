@@ -13,6 +13,8 @@ class RiskService: ObservableObject {
     @Published var roadSegments: [RoadSegment] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    /// Feature importance from model (for ranking risk drivers). Fetched with risk-definition.
+    @Published var featureImportance: [String: Double]? = nil
     
     // Backend API URL: Simulator uses localhost; device must use your Mac's IP on the same Wi‑Fi.
     #if targetEnvironment(simulator)
@@ -184,7 +186,11 @@ class RiskService: ObservableObject {
             throw APIError.serverError("Failed to load risk definition")
         }
 
-        return try JSONDecoder().decode(RiskDefinitionResponse.self, from: data)
+        let def = try JSONDecoder().decode(RiskDefinitionResponse.self, from: data)
+        await MainActor.run {
+            self.featureImportance = def.featureImportance
+        }
+        return def
     }
 
     /// Fetch safety-aware routes from backend (fastest vs safer - genuinely different routes from graph-based routing).

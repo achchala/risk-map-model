@@ -10,6 +10,7 @@ import MapKit
 
 struct RiskDetailView: View {
     let segment: RoadSegment
+    @EnvironmentObject var riskService: RiskService
     @Environment(\.dismiss) var dismiss
     @State private var cameraPosition: MapCameraPosition
 
@@ -121,7 +122,7 @@ struct RiskDetailView: View {
                     .background(Color(.systemGray6))
                     .cornerRadius(12)
 
-                    // Contributing factors (human-readable)
+                    // Contributing factors (human-readable, ranked by model importance when available)
                     if let drivers = segment.riskDrivers, !drivers.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Why this rating?")
@@ -131,7 +132,7 @@ struct RiskDetailView: View {
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
 
-                            ForEach(Array(drivers.sorted(by: { abs($0.value) > abs($1.value) }).prefix(5)), id: \.key) { item in
+                            ForEach(Array(sortedRiskDrivers(drivers).prefix(5)), id: \.key) { item in
                                 HStack(alignment: .top) {
                                     Text(formatDriverLabel(item.key))
                                         .foregroundColor(.secondary)
@@ -218,6 +219,19 @@ struct RiskDetailView: View {
         if meters < 300 { return "\(Int(meters))m (medium)" }
         return "\(Int(meters))m (long)"
     }
+
+    /// Sort risk drivers by model feature importance when available; otherwise by magnitude.
+    private func sortedRiskDrivers(_ drivers: [String: Double]) -> [(key: String, value: Double)] {
+        let imp = riskService.featureImportance ?? [:]
+        return drivers.sorted { a, b in
+            let impA = imp[a.key] ?? 0
+            let impB = imp[b.key] ?? 0
+            if impA > 0 || impB > 0 {
+                return impA > impB
+            }
+            return abs(a.value) > abs(b.value)
+        }
+    }
 }
 
 private struct TipRow: View {
@@ -237,6 +251,10 @@ private struct TipRow: View {
 }
 
 private func formatDriverLabel(_ key: String) -> String {
+    if key.hasPrefix("road_class_") {
+        let name = key.replacingOccurrences(of: "road_class_", with: "").replacingOccurrences(of: "_", with: " ")
+        return "Road class: \(name)"
+    }
     let labels: [String: String] = [
         "crashes_1d_ago": "Recent crashes (24h)",
         "crashes_7d_ago": "Recent crashes (7 days)",
@@ -250,7 +268,19 @@ private func formatDriverLabel(_ key: String) -> String {
         "datetime_hour": "Time of day",
         "day_of_week": "Day of week",
         "is_weekend": "Weekend vs weekday",
-        "month": "Season"
+        "month": "Season",
+        "avg_daily_vol": "Daily traffic volume",
+        "avg_speed": "Average speed",
+        "tmc_daily_ped_vol": "Pedestrian volume",
+        "tmc_daily_cyclist_vol": "Cyclist volume",
+        "is_school_zone": "School zone",
+        "nearby_transit_frequency": "Transit frequency",
+        "temperature": "Temperature",
+        "precipitation": "Precipitation",
+        "snow_depth_mm": "Snow depth",
+        "wind_speed": "Wind speed",
+        "is_freezing": "Freezing conditions",
+        "is_precip": "Precipitation present",
     ]
     return labels[key] ?? key.replacingOccurrences(of: "_", with: " ").capitalized
 }
@@ -258,6 +288,7 @@ private func formatDriverLabel(_ key: String) -> String {
 private func formatDriverValue(key: String, value: Double) -> String {
     if key.contains("ratio") && value <= 1 { return String(format: "%.0f%%", value * 100) }
     if key.contains("length") { return String(format: "%.0fm", value) }
+    if key.hasPrefix("road_class_") && value >= 0.99 { return "Yes" }
 
     // Human-readable values for common factors
     switch key {
@@ -287,6 +318,18 @@ private func formatDriverValue(key: String, value: Double) -> String {
         let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         let idx = Int(value) % 7
         return days.indices.contains(idx) ? days[idx] : "Day \(Int(value))"
+    case "is_school_zone", "is_freezing", "is_precip":
+        return value >= 0.5 ? "Yes" : "No"
+    case "avg_daily_vol", "tmc_daily_ped_vol", "tmc_daily_cyclist_vol", "tmc_daily_vehicle_vol":
+        return value >= 1000 ? String(format: "%.1fk", value / 1000) : String(format: "%.0f", value)
+    case "avg_speed":
+        return String(format: "%.0f km/h", value)
+    case "temperature":
+        return String(format: "%.0f°C", value)
+    case "precipitation", "snow_depth_mm":
+        return String(format: "%.1f mm", value)
+    case "wind_speed":
+        return String(format: "%.0f km/h", value)
     default:
         if value == floor(value) { return String(format: "%.0f", value) }
         return String(format: "%.2f", value)

@@ -72,4 +72,7 @@ Thumbs.db
 
 # Logs
 *.log
-logs/ 
+logs/
+
+# Temp dir (backend fallback for TMPDIR)
+backend-api/.tmp/ 

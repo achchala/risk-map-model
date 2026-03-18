@@ -8,6 +8,7 @@ Individual models live in:
 """
 
 import logging
+import pickle
 import sys
 import warnings
 from pathlib import Path
@@ -31,7 +32,10 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from sklearn.utils.class_weight import compute_class_weight
 
 # Count-regression / temporal modeling
-from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+from sklearn.ensemble import (
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+)
 from sklearn.isotonic import IsotonicRegression
 
 # Add parent directory to path for config import
@@ -47,20 +51,24 @@ logger = logging.getLogger(__name__)
 try:
     from imblearn.over_sampling import SMOTE
     from imblearn.pipeline import Pipeline as ImbPipeline
+
     SMOTE_AVAILABLE = True
 except (ImportError, AttributeError) as e:
     SMOTE_AVAILABLE = False
-    logger.warning(f"SMOTE not available ({type(e).__name__}: {e}). Using class weights instead.")
+    logger.warning(
+        f"SMOTE not available ({type(e).__name__}: {e}). Using class weights instead."
+    )
+
 
 class ModelTrainer:
     """
     Model trainer for crash risk prediction using Random Forest
     """
-    
+
     def __init__(self, random_state: int = 42):
         """
         Initialize the model trainer
-        
+
         Args:
             random_state: Random seed for reproducibility
         """
@@ -69,150 +77,203 @@ class ModelTrainer:
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
         # Always fit on all possible classes
-        self.label_encoder.fit(['low', 'medium', 'high'])
+        self.label_encoder.fit(["low", "medium", "high"])
         self.feature_columns = []
         self.class_weights = None
         self.best_params = None
         self.cv_scores = None
-        
-    def prepare_features(self, data: gpd.GeoDataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+
+    def prepare_features(
+        self, data: gpd.GeoDataFrame
+    ) -> Tuple[pd.DataFrame, pd.Series]:
         """
         Prepare features and labels for training
-        
+
         Args:
             data: GeoDataFrame with features and risk labels
-            
+
         Returns:
             Tuple of (features, labels)
         """
         logger.info("Preparing features for model training...")
-        
+
         # Define feature columns (exclude non-feature columns and target-encoding features)
         exclude_columns = [
-            'geometry', 'segment_id', '_id', 'CENTRELINE_ID', 'LINEAR_NAME_ID',
-            'LINEAR_NAME_FULL', 'LINEAR_NAME_FULL_LEGAL', 'ADDRESS_L', 'ADDRESS_R',
-            'PARITY_L', 'PARITY_R', 'LO_NUM_L', 'HI_NUM_L', 'LO_NUM_R', 'HI_NUM_R',
-            'BEGIN_ADDR_POINT_ID_L', 'END_ADDR_POINT_ID_L', 'BEGIN_ADDR_POINT_ID_R',
-            'END_ADDR_POINT_ID_R', 'BEGIN_ADDR_L', 'END_ADDR_L', 'BEGIN_ADDR_R',
-            'END_ADDR_R', 'LOW_NUM_ODD', 'HIGH_NUM_ODD', 'LOW_NUM_EVEN', 'HIGH_NUM_EVEN',
-            'LINEAR_NAME', 'LINEAR_NAME_TYPE', 'LINEAR_NAME_DIR', 'LINEAR_NAME_DESC',
-            'LINEAR_NAME_LABEL', 'FROM_INTERSECTION_ID', 'TO_INTERSECTION_ID',
-            'ONEWAY_DIR_CODE', 'ONEWAY_DIR_CODE_DESC', 'FEATURE_CODE', 'FEATURE_CODE_DESC',
-            'JURISDICTION', 'CENTRELINE_STATUS', 'OBJECTID', 'MI_PRINX',
+            "geometry",
+            "segment_id",
+            "_id",
+            "CENTRELINE_ID",
+            "LINEAR_NAME_ID",
+            "LINEAR_NAME_FULL",
+            "LINEAR_NAME_FULL_LEGAL",
+            "ADDRESS_L",
+            "ADDRESS_R",
+            "PARITY_L",
+            "PARITY_R",
+            "LO_NUM_L",
+            "HI_NUM_L",
+            "LO_NUM_R",
+            "HI_NUM_R",
+            "BEGIN_ADDR_POINT_ID_L",
+            "END_ADDR_POINT_ID_L",
+            "BEGIN_ADDR_POINT_ID_R",
+            "END_ADDR_POINT_ID_R",
+            "BEGIN_ADDR_L",
+            "END_ADDR_L",
+            "BEGIN_ADDR_R",
+            "END_ADDR_R",
+            "LOW_NUM_ODD",
+            "HIGH_NUM_ODD",
+            "LOW_NUM_EVEN",
+            "HIGH_NUM_EVEN",
+            "LINEAR_NAME",
+            "LINEAR_NAME_TYPE",
+            "LINEAR_NAME_DIR",
+            "LINEAR_NAME_DESC",
+            "LINEAR_NAME_LABEL",
+            "FROM_INTERSECTION_ID",
+            "TO_INTERSECTION_ID",
+            "ONEWAY_DIR_CODE",
+            "ONEWAY_DIR_CODE_DESC",
+            "FEATURE_CODE",
+            "FEATURE_CODE_DESC",
+            "JURISDICTION",
+            "CENTRELINE_STATUS",
+            "OBJECTID",
+            "MI_PRINX",
             # Target-encoding features causing data leakage
-            'risk_label', 'risk_level', 'fatality_flag', 'risk_score_raw', 'severity_index',
+            "risk_label",
+            "risk_level",
+            "fatality_flag",
+            "risk_score_raw",
+            "severity_index",
             # Direct outcome variables used for labeling (data leakage)
-            'num_total_crashes', 'num_ksi_crashes', 'fatality_count', 'has_crashes', 'has_ksi', 'has_fatalities',
-            'ksi_ratio', 'fatality_ratio', 'crash_density', 'ksi_density',
-            'length_crash_interaction', 'length_ksi_interaction'
+            "num_total_crashes",
+            "num_ksi_crashes",
+            "fatality_count",
+            "has_crashes",
+            "has_ksi",
+            "has_fatalities",
+            "ksi_ratio",
+            "fatality_ratio",
+            "crash_density",
+            "ksi_density",
+            "length_crash_interaction",
+            "length_ksi_interaction",
         ]
-        
+
         # Get feature columns
         feature_columns = [col for col in data.columns if col not in exclude_columns]
         self.feature_columns = feature_columns
-        
+
         # Extract features and labels
         X = data[feature_columns].copy()
-        y = data['risk_label'].copy()
-        
+        y = data["risk_label"].copy()
+
         # Handle missing values
         X = X.fillna(0)
-        
+
         # Convert categorical columns to numeric
         for col in X.columns:
-            if X[col].dtype == 'object':
+            if X[col].dtype == "object":
                 # Convert to numeric, coercing errors to NaN, then fill with 0
-                X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
-        
+                X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0)
+
         # Ensure all data is numeric
         X = X.astype(float)
-        
+
         # Encode labels
         y_encoded = self.label_encoder.fit_transform(y)
-        
+
         logger.info(f"Prepared {len(feature_columns)} features for {len(X)} samples")
-        logger.info(f"Label distribution: {dict(zip(self.label_encoder.classes_, np.bincount(y_encoded)))}")
-        
+        logger.info(
+            f"Label distribution: {dict(zip(self.label_encoder.classes_, np.bincount(y_encoded)))}"
+        )
+
         return X, y_encoded
-    
-    def handle_class_imbalance(self, X: pd.DataFrame, y: np.ndarray) -> Tuple[pd.DataFrame, np.ndarray]:
+
+    def handle_class_imbalance(
+        self, X: pd.DataFrame, y: np.ndarray
+    ) -> Tuple[pd.DataFrame, np.ndarray]:
         """
         Handle class imbalance using SMOTE or class weights
-        
+
         Args:
             X: Feature matrix
             y: Target labels
-            
+
         Returns:
             Balanced feature matrix and labels
         """
         if SMOTE_AVAILABLE:
             logger.info("Handling class imbalance with SMOTE...")
-            
+
             # Apply SMOTE for oversampling minority classes
             smote = SMOTE(random_state=self.random_state, k_neighbors=3)
             X_balanced, y_balanced = smote.fit_resample(X, y)
-            
+
             logger.info(f"Original class distribution: {np.bincount(y)}")
             logger.info(f"Balanced class distribution: {np.bincount(y_balanced)}")
-            
+
             return X_balanced, y_balanced
         else:
-            logger.info("SMOTE not available. Using original data with class weights...")
+            logger.info(
+                "SMOTE not available. Using original data with class weights..."
+            )
             return X, y
-    
-    def train_model(self, X: pd.DataFrame, y: np.ndarray, 
-                   use_hyperparameter_tuning: bool = True) -> Dict[str, Any]:
+
+    def train_model(
+        self, X: pd.DataFrame, y: np.ndarray, use_hyperparameter_tuning: bool = True
+    ) -> Dict[str, Any]:
         """
         Train the Random Forest model
-        
+
         Args:
             X: Feature matrix
             y: Target labels
             use_hyperparameter_tuning: Whether to use GridSearchCV
-            
+
         Returns:
             Dictionary with training results
         """
         logger.info("Training Random Forest model...")
-        
+
         # Split data
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=self.random_state, stratify=y
         )
-        
+
         # Scale features
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
-        
+
         if use_hyperparameter_tuning:
             # Define parameter grid for GridSearchCV
             param_grid = {
-                'n_estimators': [100, 200, 300],
-                'max_depth': [10, 15, 20, None],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'class_weight': ['balanced', 'balanced_subsample']
+                "n_estimators": [100, 200, 300],
+                "max_depth": [10, 15, 20, None],
+                "min_samples_split": [2, 5, 10],
+                "min_samples_leaf": [1, 2, 4],
+                "class_weight": ["balanced", "balanced_subsample"],
             }
-            
+
             # Initialize base model
             base_model = RandomForestClassifier(random_state=self.random_state)
-            
+
             # Perform GridSearchCV
             grid_search = GridSearchCV(
-                base_model, param_grid, cv=5, scoring='f1_macro', 
-                n_jobs=-1, verbose=1
+                base_model, param_grid, cv=5, scoring="f1_macro", n_jobs=-1, verbose=1
             )
-            
+
             grid_search.fit(X_train_scaled, y_train)
-            
+
             # Get best model
             self.model = grid_search.best_estimator_
             self.best_params = grid_search.best_params_
-            
+
             logger.info(f"Best parameters: {self.best_params}")
             logger.info(f"Best CV score: {grid_search.best_score_:.4f}")
-            
+
         else:
             # Train with default parameters
             self.model = RandomForestClassifier(
@@ -220,135 +281,145 @@ class ModelTrainer:
                 max_depth=15,
                 min_samples_split=5,
                 min_samples_leaf=2,
-                class_weight='balanced',
-                random_state=self.random_state
+                class_weight="balanced",
+                random_state=self.random_state,
             )
-            
+
             self.model.fit(X_train_scaled, y_train)
-        
+
         # Make predictions
         y_pred = self.model.predict(X_test_scaled)
         y_pred_proba = self.model.predict_proba(X_test_scaled)
-        
+
         # Calculate basic metrics
         accuracy = accuracy_score(y_test, y_pred)
-        
+
         # Cross-validation scores
         cv_scores = cross_val_score(
-            self.model, X_train_scaled, y_train, cv=5, scoring='f1_macro'
+            self.model, X_train_scaled, y_train, cv=5, scoring="f1_macro"
         )
         self.cv_scores = cv_scores
-        
+
         # Calculate detailed performance metrics
-        from sklearn.metrics import classification_report, confusion_matrix, precision_recall_fscore_support
-        
+        from sklearn.metrics import (
+            classification_report,
+            confusion_matrix,
+            precision_recall_fscore_support,
+        )
+
         # Classification report
         class_report = classification_report(y_test, y_pred, output_dict=True)
-        
+
         # Confusion matrix
         cm = confusion_matrix(y_test, y_pred)
-        
+
         # Per-class metrics
-        precision, recall, f1, support = precision_recall_fscore_support(y_test, y_pred, average=None)
-        
+        precision, recall, f1, support = precision_recall_fscore_support(
+            y_test, y_pred, average=None
+        )
+
         # Prediction confidence analysis
         max_proba = np.max(y_pred_proba, axis=1)
         confidence_analysis = {
-            'mean_confidence': np.mean(max_proba),
-            'confidence_when_correct': np.mean(max_proba[y_test == y_pred]),
-            'confidence_when_wrong': np.mean(max_proba[y_test != y_pred]),
-            'high_confidence_errors': np.sum((max_proba > 0.8) & (y_test != y_pred))
+            "mean_confidence": np.mean(max_proba),
+            "confidence_when_correct": np.mean(max_proba[y_test == y_pred]),
+            "confidence_when_wrong": np.mean(max_proba[y_test != y_pred]),
+            "high_confidence_errors": np.sum((max_proba > 0.8) & (y_test != y_pred)),
         }
-        
+
         # Prepare results
         results = {
-            'accuracy': accuracy,
-            'cv_mean': cv_scores.mean(),
-            'cv_std': cv_scores.std(),
-            'best_params': self.best_params,
-            'feature_importance': dict(zip(self.feature_columns, self.model.feature_importances_)),
-            'y_test': y_test,
-            'y_pred': y_pred,
-            'y_pred_proba': y_pred_proba,
-            'X_test': X_test,
-            'X_test_scaled': X_test_scaled,
-            'classification_report': class_report,
-            'confusion_matrix': cm,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'support': support,
-            'confidence_analysis': confidence_analysis
+            "accuracy": accuracy,
+            "cv_mean": cv_scores.mean(),
+            "cv_std": cv_scores.std(),
+            "best_params": self.best_params,
+            "feature_importance": dict(
+                zip(self.feature_columns, self.model.feature_importances_)
+            ),
+            "y_test": y_test,
+            "y_pred": y_pred,
+            "y_pred_proba": y_pred_proba,
+            "X_test": X_test,
+            "X_test_scaled": X_test_scaled,
+            "classification_report": class_report,
+            "confusion_matrix": cm,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "support": support,
+            "confidence_analysis": confidence_analysis,
         }
-        
+
         logger.info(f"Model training completed!")
         logger.info(f"Test accuracy: {accuracy:.4f}")
-        logger.info(f"CV F1-score: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
-        
+        logger.info(
+            f"CV F1-score: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})"
+        )
+
         return results
-    
+
     def save_model(self, filepath: str):
         """
         Save the trained model
-        
+
         Args:
             filepath: Path to save the model
         """
         model_data = {
-            'model': self.model,
-            'scaler': self.scaler,
-            'label_encoder': self.label_encoder,
-            'feature_columns': self.feature_columns,
-            'best_params': self.best_params,
-            'cv_scores': self.cv_scores
+            "model": self.model,
+            "scaler": self.scaler,
+            "label_encoder": self.label_encoder,
+            "feature_columns": self.feature_columns,
+            "best_params": self.best_params,
+            "cv_scores": self.cv_scores,
         }
-        
-        with open(filepath, 'wb') as f:
+
+        with open(filepath, "wb") as f:
             pickle.dump(model_data, f)
-        
+
         logger.info(f"Model saved to {filepath}")
-    
+
     def load_model(self, filepath: str):
         """
         Load a trained model
-        
+
         Args:
             filepath: Path to the saved model
         """
-        with open(filepath, 'rb') as f:
+        with open(filepath, "rb") as f:
             model_data = pickle.load(f)
-        
-        self.model = model_data['model']
-        self.scaler = model_data['scaler']
-        self.label_encoder = model_data['label_encoder']
-        self.feature_columns = model_data['feature_columns']
-        self.best_params = model_data['best_params']
-        self.cv_scores = model_data['cv_scores']
-        
+
+        self.model = model_data["model"]
+        self.scaler = model_data["scaler"]
+        self.label_encoder = model_data["label_encoder"]
+        self.feature_columns = model_data["feature_columns"]
+        self.best_params = model_data["best_params"]
+        self.cv_scores = model_data["cv_scores"]
+
         logger.info(f"Model loaded from {filepath}")
-    
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """
         Make predictions on new data
-        
+
         Args:
             X: Feature matrix
-            
+
         Returns:
             Predicted labels
         """
         if self.model is None:
             raise ValueError("Model not trained. Call train_model() first.")
-        
+
         # Ensure same features
         X = X[self.feature_columns].fillna(0)
-        
+
         # Scale features
         X_scaled = self.scaler.transform(X)
-        
+
         # Make predictions
         predictions = self.model.predict(X_scaled)
-        
+
         return predictions
 
 
@@ -370,7 +441,9 @@ class TemporalCountModelTrainer:
     ):
         self.random_state = random_state
         self.panel_config = panel_config or PanelConfig()
-        self.lambda_cap = lambda_cap  # cap predicted λ (crashes per window) for stability and routing
+        self.lambda_cap = (
+            lambda_cap  # cap predicted λ (crashes per window) for stability and routing
+        )
         self.model: Optional[HistGradientBoostingRegressor] = None
         self.scaler = StandardScaler()
         self.feature_columns: list[str] = []
@@ -445,7 +518,11 @@ class TemporalCountModelTrainer:
         X = X.astype(float)
 
         self.feature_columns = feature_cols
-        logger.info("Panel features prepared: %d features, %d samples.", len(feature_cols), len(X))
+        logger.info(
+            "Panel features prepared: %d features, %d samples.",
+            len(feature_cols),
+            len(X),
+        )
         logger.info("Feature columns: %s", feature_cols)
 
         return X, y
@@ -470,12 +547,8 @@ class TemporalCountModelTrainer:
         X_train, y_train = self.prepare_panel_features(
             train_data, target_col=target_col
         )
-        X_val, y_val = self.prepare_panel_features(
-            val_data, target_col=target_col
-        )
-        X_test, y_test = self.prepare_panel_features(
-            test_data, target_col=target_col
-        )
+        X_val, y_val = self.prepare_panel_features(val_data, target_col=target_col)
+        X_test, y_test = self.prepare_panel_features(test_data, target_col=target_col)
 
         # Scale features
         X_train_scaled = self.scaler.fit_transform(X_train)
@@ -537,7 +610,9 @@ class TemporalCountModelTrainer:
         y_true_clipped = np.maximum(y_test, eps)
         y_pred_clipped = np.maximum(y_pred, eps)
         poisson_deviance = 2 * np.mean(
-            y_pred_clipped - y_true_clipped + y_true_clipped * np.log(y_true_clipped / y_pred_clipped)
+            y_pred_clipped
+            - y_true_clipped
+            + y_true_clipped * np.log(y_true_clipped / y_pred_clipped)
         )
 
         # Calibration on validation set (probability that a window has ≥1 crash)
@@ -612,7 +687,9 @@ class TemporalCountModelTrainer:
         probability (e.g., λ_hour = λ_window / window_size_hours).
         """
         if self.model is None:
-            raise ValueError("Model not trained. Call train_temporal_count_model() first.")
+            raise ValueError(
+                "Model not trained. Call train_temporal_count_model() first."
+            )
 
         X = X[self.feature_columns].fillna(0)
         for col in X.columns:
@@ -678,14 +755,27 @@ class HurdleTemporalTrainer:
     ) -> Tuple[pd.DataFrame, pd.Series]:
         """Extract feature matrix and target; same API as TemporalCountModelTrainer (explicit_feature_cols unused)."""
         exclude = {
-            "segment_id", "FROM_INTERSECTION_ID", "TO_INTERSECTION_ID",
-            "segment_centroid_lat", "segment_centroid_lon",
-            "window_start", "future_window_start", "datetime_hour",
-            "lat_grid", "lon_grid",
-            "ROAD_CLASS", "season",
-            "hour_of_day", "day_of_week", "month",
-            "crash_count", "future_crash_count", "is_ksi", "fatalities",
-            "sample_weight", "sample_weight_tail",
+            "segment_id",
+            "FROM_INTERSECTION_ID",
+            "TO_INTERSECTION_ID",
+            "segment_centroid_lat",
+            "segment_centroid_lon",
+            "window_start",
+            "future_window_start",
+            "datetime_hour",
+            "lat_grid",
+            "lon_grid",
+            "ROAD_CLASS",
+            "season",
+            "hour_of_day",
+            "day_of_week",
+            "month",
+            "crash_count",
+            "future_crash_count",
+            "is_ksi",
+            "fatalities",
+            "sample_weight",
+            "sample_weight_tail",
         }
         exclude.update({c for c in panel.columns if c.startswith("sample_weight")})
 
@@ -711,7 +801,9 @@ class HurdleTemporalTrainer:
         """
         train_data, val_data, test_data = temporal_train_val_test_split(panel)
 
-        X_train, y_train = self.prepare_panel_features(train_data, target_col=target_col)
+        X_train, y_train = self.prepare_panel_features(
+            train_data, target_col=target_col
+        )
         X_val, y_val = self.prepare_panel_features(val_data, target_col=target_col)
         X_test, y_test = self.prepare_panel_features(test_data, target_col=target_col)
 
@@ -761,7 +853,9 @@ class HurdleTemporalTrainer:
                 "Check panel construction and target column."
             )
 
-        w_pos = sample_weight_train[pos_mask] if sample_weight_train is not None else None
+        w_pos = (
+            sample_weight_train[pos_mask] if sample_weight_train is not None else None
+        )
         self.stage2 = HistGradientBoostingRegressor(
             loss="poisson",
             max_depth=6,
@@ -772,9 +866,7 @@ class HurdleTemporalTrainer:
         self.stage2.fit(X_train_s[pos_mask], y_train[pos_mask], sample_weight=w_pos)
 
         # --- Evaluate on test set ---
-        y_pred = self.predict_lambda(
-            pd.DataFrame(X_test, columns=self.feature_columns)
-        )
+        y_pred = self.predict_lambda(pd.DataFrame(X_test, columns=self.feature_columns))
         if self.lambda_cap is not None:
             y_pred = np.clip(y_pred, 0.0, self.lambda_cap)
 
@@ -790,7 +882,9 @@ class HurdleTemporalTrainer:
 
         logger.info(
             "Hurdle model evaluation — MAE=%.4f, RMSE=%.4f, Poisson dev=%.4f",
-            mae, rmse, poisson_deviance,
+            mae,
+            rmse,
+            poisson_deviance,
         )
 
         return {
@@ -813,7 +907,9 @@ class HurdleTemporalTrainer:
         Applies lambda_cap when set.
         """
         if self.stage1 is None or self.stage2 is None:
-            raise ValueError("Model not trained. Call train_temporal_count_model() first.")
+            raise ValueError(
+                "Model not trained. Call train_temporal_count_model() first."
+            )
 
         X_feat = X[self.feature_columns].fillna(0)
         for col in X_feat.columns:
@@ -886,36 +982,41 @@ def test_model_trainer():
     from data_processing.spatial_join_fast import perform_spatial_join_fast
     from feature_engineering.feature_creator import create_segment_features
     from feature_engineering.label_generator import generate_risk_labels
-    
+
     logging.basicConfig(level=logging.INFO)
     data_dir = Path("data")
-    
+
     # Load and process data
     collision_data, ksi_data, road_network = load_and_clean_data(data_dir)
     segment_crashes = perform_spatial_join_fast(collision_data, ksi_data, road_network)
     segment_features = create_segment_features(segment_crashes, road_network)
     labeled_segments = generate_risk_labels(segment_features)
-    
+
     # Initialize and train model
     trainer = ModelTrainer()
     X, y = trainer.prepare_features(labeled_segments)
     X_balanced, y_balanced = trainer.handle_class_imbalance(X, y)
-    results = trainer.train_model(X_balanced, y_balanced, use_hyperparameter_tuning=False)
-    
+    results = trainer.train_model(
+        X_balanced, y_balanced, use_hyperparameter_tuning=False
+    )
+
     # Print results
     print(f"\nModel Training Results:")
     print(f"Test Accuracy: {results['accuracy']:.4f}")
     print(f"CV F1-Score: {results['cv_mean']:.4f} (+/- {results['cv_std'] * 2:.4f})")
     print(f"Best Parameters: {results['best_params']}")
-    
+
     # Show top 10 feature importance
-    feature_importance = results['feature_importance']
-    top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:10]
+    feature_importance = results["feature_importance"]
+    top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[
+        :10
+    ]
     print(f"\nTop 10 Feature Importance:")
     for feature, importance in top_features:
         print(f"  {feature}: {importance:.4f}")
-    
+
     return trainer, results
 
+
 if __name__ == "__main__":
-    test_model_trainer() 
+    test_model_trainer()

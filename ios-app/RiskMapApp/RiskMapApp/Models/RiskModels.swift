@@ -184,6 +184,8 @@ struct RiskDefinitionResponse: Codable {
     let low: String
     let medium: String
     let high: String
+    /// Feature importance from model (for ranking risk drivers). Optional; backend sends when available.
+    let featureImportance: [String: Double]?
 }
 
 // MARK: - Route (MapKit or backend-based, for safer vs optimal comparison)
