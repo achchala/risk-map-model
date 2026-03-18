@@ -1,103 +1,125 @@
-# Toronto Road Segment Crash Risk Prediction MVP
+# Toronto Road Segment Crash Risk Prediction
 
-## Project Overview
-This project builds a geospatial machine learning model to predict crash risk levels for road segments in Toronto using open traffic collision data. The model outputs risk labels (Low/Medium/High) and scores per road segment, suitable for visualization as heatmaps or geo-layers.
+A geospatial ML system that predicts crash risk (λ) for road segments in Toronto and powers an iOS app with safety-aware routing.
+
+## Overview
+
+- **Model**: Two-stage hurdle model — Stage 1 predicts P(crash), Stage 2 predicts E[count | crash]. Combined: λ = P × E.
+- **Output**: Predicted crash rate λ per segment-hour; risk labels (Low/Medium/High) from percentile thresholds.
+- **Stack**: Python (scikit-learn, GeoPandas), Flask API, SwiftUI iOS app with MapKit.
 
 ## Project Structure
+
 ```
 risk-map-model/
 ├── data/                          # Raw datasets
-│   ├── Traffic_Collisions_Open_Data_2437597425626428496.xlsx
-│   ├── TOTAL_KSI_6386614326836635957.csv
-│   └── Centreline - Version 2 - 4326.geojson
-├── src/                           # Source code
-│   ├── data_processing/           # Data cleaning and spatial joins
-│   ├── feature_engineering/       # Feature creation and risk labeling
-│   ├── models/                    # Model training and evaluation
-│   └── visualization/             # Interactive maps and dashboards
-├── outputs/                       # Generated outputs
-│   ├── maps/                      # Interactive risk maps (HTML)
-│   ├── models/                    # Trained model artifacts
-│   └── reports/                   # Analysis reports and data exports
-├── ios-app/                       # iOS app
-│   └── RiskMapApp/                # SwiftUI iOS application
-├── backend-api/                   # Flask API server for iOS app
-│   ├── app.py                     # API endpoints
-│   └── requirements.txt           # Python dependencies
-├── run_risk_analysis.py           # Main pipeline script
-├── config.py                      # Configuration settings
-└── requirements.txt               # Python dependencies
+│   ├── Traffic_Collisions_Open_Data_*.xlsx
+│   ├── TOTAL_KSI_*.csv
+│   ├── Centreline - Version 2 - 4326.geojson
+│   ├── model_dataset.csv          # ADT/speed
+│   ├── historicalweather.csv
+│   ├── tmc_raw_data_*.csv         # TMC intersection counts
+│   ├── School locations-*.csv
+│   └── TTC Routes and Schedules Data/  # Optional GTFS
+├── src/
+│   ├── data_processing/           # Data loading, spatial joins
+│   ├── feature_engineering/      # Panel builder, temporal features
+│   ├── models/                    # Model training
+│   │   ├── hurdle_model/          # train_temporal_model.py (main entry)
+│   │   ├── hurdle/               # HurdleTemporalTrainer
+│   │   ├── temporal_count/       # Single-stage Poisson
+│   │   └── legacy_classifier/    # Legacy Random Forest
+│   ├── routing/                   # Road graph, Dijkstra, safety-aware routes
+│   └── visualization/             # Risk maps
+├── outputs/
+│   ├── models/                    # toronto_temporal_count_model.pkl
+│   └── reports/                   # panel_latest.parquet, diagnostics
+├── backend-api/                   # Flask API for iOS
+├── ios-app/                       # SwiftUI iOS app
+├── docs/                          # Architecture, routing, formulas
+├── config.py
+└── requirements.txt
 ```
 
 ## Data Sources
-1. **Traffic Collision Data (MVC)**: Toronto Police Open Data - general collision records
-2. **Killed or Seriously Injured (KSI) Data**: Toronto Police Open Data - severe crash cases
-3. **Road Network Geometry**: Toronto Open Data Portal - road segment geometries
 
-## Key Features
-- **Spatial Processing**: Optimized spatial join for crash-to-segment matching
-- **Feature Engineering**: Crash statistics, temporal patterns, road characteristics
-- **Risk Classification**: 3-class model (Low/Medium/High) with confidence scores
-- **Interactive Visualization**: HTML dashboards with risk maps and performance metrics
-- **Model Performance**: Detailed evaluation including confusion matrix and per-class metrics
-- **Data Export**: GeoJSON and CSV formats for further analysis
 
-## Model Approach
-- **Algorithm**: Random Forest Classifier with SMOTE for class balancing
-- **Evaluation**: Cross-validation with detailed performance metrics (accuracy, precision, recall, F1-score)
-- **Features**: Segment-level crash statistics, temporal patterns, road characteristics
-- **Output**: Risk labels + confidence scores per road segment
-- **Performance Reporting**: Confusion matrix and per-class performance analysis
+| Source                   | Purpose                                            |
+| ------------------------ | -------------------------------------------------- |
+| Traffic Collisions (MVC) | Crash events for spatial join                      |
+| KSI Data                 | Severe crash events                                |
+| Centreline GeoJSON       | Road network geometry                              |
+| model_dataset.csv        | ADT, speed, exposure                               |
+| historicalweather.csv    | Temperature, precipitation, snow                   |
+| TMC data                 | Pedestrian/cyclist/vehicle counts at intersections |
+| School locations         | School zone flag                                   |
+| TTC GTFS (optional)      | Transit frequency                                  |
+
+
+## Model
+
+- **Algorithm**: Hurdle model — HistGradientBoostingClassifier (Stage 1) + HistGradientBoostingRegressor with Poisson loss (Stage 2).
+- **Features**: Traffic volume, road geometry, weather, temporal indicators, crash lags, historical profiles, TMC exposure, school/transit context.
+- **Risk labels**: Low ≤ p70, Medium p70–p90, High > p90 (percentiles of λ).
 
 ## Installation
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ## Usage
-1. Place your datasets in the `data/` folder
-2. Run the main pipeline: `python run_risk_analysis.py`
-3. View outputs in `outputs/` folder:
-   - **Interactive Dashboard**: `outputs/maps/toronto_risk_analysis_dashboard.html`
-   - **Risk Map**: `outputs/maps/toronto_risk_map.html`
-   - **Summary Report**: `outputs/reports/risk_analysis_summary.html`
-   - **Data Exports**: `outputs/reports/` (CSV and GeoJSON files)
 
-## Limitations (MVP)
-- No traffic volume/exposure data
-- Static analysis (no temporal filtering)
-- No weather integration
-- Based on crash frequency, not crash rate per vehicle
+### 1. Train the model
 
-## iOS App
+```bash
+python src/models/hurdle_model/train_temporal_model.py
+```
 
-iOS app built with SwiftUI and MapKit.
+Outputs:
 
-### Quick Start
+- `outputs/models/toronto_temporal_count_model.pkl`
+- `outputs/reports/panel_latest.parquet`
 
-1. **Open in Xcode:**
-   ```bash
-   cd ios-app/RiskMapApp
-   open RiskMapApp.xcodeproj
-   ```
+### 2. Run the backend API
 
-2. **Set up Backend API:**
-   ```bash
-   cd backend-api
-   pip install -r requirements.txt
-   python app.py
-   ```
+```bash
+cd backend-api
+pip install -r requirements.txt
+python app.py
+```
 
-3. **Update API endpoint** in `RiskMapApp/Services/RiskService.swift`
+API runs at `http://localhost:8000`. See `backend-api/README.md` for endpoints.
 
-4. **Build and run** in Xcode (Cmd+R)
+### 3. Run the iOS app
 
-See `ios-app/README.md` and `ios-app/SETUP_GUIDE.md` for detailed instructions.
+```bash
+cd ios-app/RiskMapApp
+open RiskMapApp.xcodeproj
+```
+
+- **Simulator**: Uses `localhost:8000`
+- **Device**: Update `baseURL` in `RiskService.swift` to your Mac's IP (same Wi‑Fi)
+
+See `ios-app/README.md` and `ios-app/QUICK_START.md` for details.
+
+## Key Features
+
+- **Temporal panel**: Segment × window with crash counts, lags, weather, road attributes.
+- **Safety-aware routing**: Dijkstra on road graph with risk-weighted edge costs; offers fastest vs safer route.
+- **Risk explanation**: UI shows contributing factors (traffic, weather, history, etc.) ranked by model importance.
+- **Weather integration**: Historical (NOAA) and live (WeatherAPI.com) for risk adjustment.
+
+## API Endpoints
 
 
-## Future Enhancements
-- Real-time updates
-- Weather integration
-- Traffic volume data
-- Temporal risk patterns
-- Route planning integration
+| Method | Endpoint                   | Purpose                       |
+| ------ | -------------------------- | ----------------------------- |
+| POST   | `/api/risk-predictions`    | Risk predictions for map bbox |
+| GET    | `/api/risk-prediction`     | Risk for a single location    |
+| GET    | `/api/risk-definition`     | p70, p90, feature importance  |
+| POST   | `/api/routes/safety-aware` | Fastest + safer route options |
+
+
+
+

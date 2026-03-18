@@ -9,10 +9,12 @@ flask api server for serving risk predictions to the iOS app
 pip install -r requirements.txt
 ```
 
-2. ensure that the trained model exists at:
+2. ensure the trained model and panel exist:
 ```
-../outputs/models/toronto_risk_model.joblib
+../outputs/models/toronto_temporal_count_model.pkl
+../outputs/reports/panel_latest.parquet
 ```
+Run `python src/models/hurdle_model/train_temporal_model.py` from project root to generate them.
 
 3. run the server:
 ```bash
@@ -59,8 +61,14 @@ get risk predictions for a geographic region
 ]
 ```
 
+### GET `/api/risk-definition`
+Returns p70, p90 thresholds, risk label descriptions, and optional `featureImportance` for ranking risk drivers.
+
+### POST `/api/routes/safety-aware`
+Returns fastest and safer route options between origin and destination. Request body: `{ "origin": { "latitude", "longitude" }, "destination": { "latitude", "longitude" }, "beta": 0.1 }`.
+
 ### POST `/api/risk-prediction`
-get risk prediction for a specific location
+Get risk prediction for a specific location
 
 **Request:**
 ```json
@@ -86,27 +94,17 @@ get risk prediction for a specific location
 
 ## Features
 
-- model integration: uses the trained Random Forest model from the pipeline
-- pre-processed data: fast responses using pre-computed predictions
-- on-demand predictions: Ccn generate fresh predictions using the model
-- probability scores: returns prediction probabilities (not just labels)
-- CORS enabled for iOS app integration
+- **Temporal hurdle model**: Uses `HurdleTemporalTrainer` (two-stage: P(crash) × E[count|crash])
+- **Panel-based inference**: Loads `panel_latest.parquet` and predicts λ per segment for latest window
+- **Risk drivers**: Returns contributing factors (traffic, weather, history) ranked by feature importance
+- **Safety-aware routing**: `/api/routes/safety-aware` for fastest vs safer route options
+- **CORS enabled** for iOS app integration
 
 ## How It Works
 
-1. **pre-processed data path**:
-   - loads GeoJSON with pre-computed predictions from the pipeline
-   - returns predictions instantly for visible map regions
-   - optionally refreshes predictions using the model if available
-
-2. **on-demand path**:
-   - falls back to raw road network if pre-processed data unavailable
-   - returns basic segment info (full prediction requires crash data)
-
-3. **model predictions**:
-   - uses `ModelTrainer.predict()` and `predict_proba()` for fresh predictions
-   - handles feature extraction and scaling automatically
-   - returns both risk label and confidence probabilities
+1. **Startup**: Loads road network, panel data, and trained model; computes λ map for latest window
+2. **risk-predictions**: Filters segments by bbox, returns risk labels + drivers + explanation
+3. **routes/safety-aware**: Dijkstra on road graph with risk-weighted edge costs; returns two route options
 
 ## next steps!!
 
