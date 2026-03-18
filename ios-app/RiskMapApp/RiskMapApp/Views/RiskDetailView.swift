@@ -122,6 +122,31 @@ struct RiskDetailView: View {
                     .background(Color(.systemGray6))
                     .cornerRadius(12)
 
+                    // Crash history (historical record on this segment)
+                    if segment.numTotalCrashes > 0 || segment.numKSICrashes > 0 || segment.fatalityCount > 0 {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Crash History")
+                                .font(.headline)
+
+                            Text("Recorded crashes on this road segment (Toronto Police data):")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+
+                            if segment.numTotalCrashes > 0 {
+                                InfoRow(label: "Total crashes", value: "\(segment.numTotalCrashes)")
+                            }
+                            if segment.numKSICrashes > 0 {
+                                InfoRow(label: "Serious injuries (KSI)", value: "\(segment.numKSICrashes)")
+                            }
+                            if segment.fatalityCount > 0 {
+                                InfoRow(label: "Fatalities", value: "\(segment.fatalityCount)")
+                            }
+                        }
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+                    }
+
                     // Contributing factors (human-readable, ranked by model importance when available)
                     if let drivers = segment.riskDrivers, !drivers.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {

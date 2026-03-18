@@ -158,11 +158,17 @@ struct AvoidedSegment: Codable, Identifiable, Equatable {
     let LINEAR_NAME: String
     let ROAD_CLASS: String
     let risk_label: String
-    
+    let numTotalCrashes: Int?
+    let numKSICrashes: Int?
+    let fatalityCount: Int?
+
     enum CodingKeys: String, CodingKey {
         case segmentId, lambdaPerHour, riskDrivers, coordinates, LINEAR_NAME, ROAD_CLASS, risk_label
         case riskExplanation = "risk_explanation"
         case segmentLocation = "segment_location"
+        case numTotalCrashes = "num_total_crashes"
+        case numKSICrashes = "num_ksi_crashes"
+        case fatalityCount = "fatality_count"
     }
     
     var riskLevel: RiskLevel {

@@ -409,13 +409,46 @@ def _road_class_label(col: str) -> str:
     return col.replace("_", " ").title()
 
 
-def _build_risk_explanation(drivers: dict, risk_label: str) -> str:
+def _build_risk_explanation(
+    drivers: dict,
+    risk_label: str,
+    *,
+    num_total_crashes: Optional[int] = None,
+    num_ksi_crashes: Optional[int] = None,
+    fatality_count: Optional[int] = None,
+) -> str:
     """
     Build human-readable paragraph explaining which factors contributed to risk.
-    Ranks factors by model feature importance when available; otherwise by magnitude.
+    Includes crash history when available; ranks model factors by feature importance.
     """
     risk_text = risk_label.replace("_", " ").title()
-    if not drivers:
+    parts = []
+
+    # Crash history: total crashes, KSI, fatalities (historical record on this segment)
+    if (
+        num_total_crashes is not None
+        or num_ksi_crashes is not None
+        or fatality_count is not None
+    ):
+        total = int(num_total_crashes or 0)
+        ksi = int(num_ksi_crashes or 0)
+        fatal = int(fatality_count or 0)
+        if total > 0 or ksi > 0 or fatal > 0:
+            hist_parts = []
+            if total > 0:
+                hist_parts.append(f"{total} crash{'es' if total != 1 else ''} on record")
+            if ksi > 0:
+                hist_parts.append(f"{ksi} serious injury (KSI)")
+            if fatal > 0:
+                hist_parts.append(f"{fatal} fatal{'ity' if fatal == 1 else 'ities'}")
+            parts.append(
+                f"Historical record: {', '.join(hist_parts)}."
+            )
+
+    hist_intro = " ".join(parts) if parts else ""
+    factor_parts = []
+
+    if not drivers and not hist_intro:
         return (
             f"This segment is rated {risk_text} risk based on the predicted crash rate (λ) "
             "for this segment."
@@ -434,7 +467,6 @@ def _build_risk_explanation(drivers: dict, risk_label: str) -> str:
 
     sorted_items = sorted(drivers.items(), key=sort_key)
 
-    parts = []
     for k, v in sorted_items:
         if v is None or (isinstance(v, (int, float)) and v == 0):
             continue
@@ -444,46 +476,55 @@ def _build_risk_explanation(drivers: dict, risk_label: str) -> str:
             label = _FEATURE_LABELS.get(k, _road_class_label(k) if k.startswith("road_class_") else k.replace("_", " ").title())
         if isinstance(v, (int, float)):
             if k.startswith("road_class_") and v == 1:
-                parts.append(label)
+                factor_parts.append(label)
             elif "crash" in k.lower() or "hist" in k.lower():
-                parts.append(
+                factor_parts.append(
                     f"{label} ({v:.1f})" if isinstance(v, float) else f"{label} ({v})"
                 )
             elif "degree" in k:
-                parts.append(f"{label} ({v})")
+                factor_parts.append(f"{label} ({v})")
             elif "ratio" in k:
-                parts.append(f"{label} ({v:.0%})" if v <= 1 else f"{label} ({v:.1f})")
+                factor_parts.append(f"{label} ({v:.0%})" if v <= 1 else f"{label} ({v:.1f})")
             elif "length" in k:
-                parts.append(
+                factor_parts.append(
                     f"{label} ({v:.1f}m)" if isinstance(v, float) else f"{label} ({v}m)"
                 )
             elif "vol" in k or "volume" in k.lower() or "speed" in k.lower():
-                parts.append(
+                factor_parts.append(
                     f"{label} ({v:,.0f})" if v >= 100 else f"{label} ({v:.1f})"
                 )
             else:
-                parts.append(
+                factor_parts.append(
                     f"{label} ({v:.1f})" if isinstance(v, float) else f"{label} ({v})"
                 )
         else:
-            parts.append(f"{label} ({v})")
-        if len(parts) >= 5:
+            factor_parts.append(f"{label} ({v})")
+        if len(factor_parts) >= 5:
             break
-    if not parts:
-        return (
-            f"This segment is rated {risk_text} risk based on the predicted crash rate (λ) "
-            "for this segment."
-        )
-    if len(parts) == 1:
-        factor_text = parts[0]
-    elif len(parts) == 2:
-        factor_text = f"{parts[0]} and {parts[1]}"
+
+    # Build final explanation: crash history first, then model factors
+    intro = f"This segment is rated {risk_text} risk based on the predicted crash rate."
+    if hist_intro:
+        intro = f"{intro} {hist_intro}"
+    if not factor_parts:
+        return intro.rstrip(".")
+    if len(factor_parts) == 1:
+        factor_text = factor_parts[0]
+    elif len(factor_parts) == 2:
+        factor_text = f"{factor_parts[0]} and {factor_parts[1]}"
     else:
-        factor_text = ", ".join(parts[:-1]) + ", and " + parts[-1]
-    return (
-        f"This segment is rated {risk_text} risk based on the predicted crash rate. "
-        f"The main contributing factors are: {factor_text}."
-    )
+        factor_text = ", ".join(factor_parts[:-1]) + ", and " + factor_parts[-1]
+    return f"{intro} The main contributing factors are: {factor_text}."
+
+
+def _safe_int(val, default=0):
+    """Convert value to int, handling None and NaN."""
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
 
 
 def _safe_str_val(val, default=""):
@@ -629,7 +670,13 @@ def get_risk_predictions():
             confidence = float(np.clip(confidence, 0.01, 1.0))
 
             drivers = _get_risk_driver_features_for_segment(seg_id)
-            risk_explanation = _build_risk_explanation(drivers, risk_label)
+            risk_explanation = _build_risk_explanation(
+                drivers,
+                risk_label,
+                num_total_crashes=_safe_int(segment.get("num_total_crashes")),
+                num_ksi_crashes=_safe_int(segment.get("num_ksi_crashes")),
+                fatality_count=_safe_int(segment.get("fatality_count")),
+            )
 
             segment_location = _get_segment_location_description(segment)
             result = {
@@ -1010,8 +1057,14 @@ def get_safety_aware_route():
             )
             drivers = _get_risk_driver_features_for_segment(seg_id)
             risk_label = _lambda_to_risk_label(lam)
-            risk_explanation = _build_risk_explanation(drivers, risk_label)
             row = _segment_row_by_id(seg_id)
+            risk_explanation = _build_risk_explanation(
+                drivers,
+                risk_label,
+                num_total_crashes=_safe_int(row.get("num_total_crashes")) if row is not None else 0,
+                num_ksi_crashes=_safe_int(row.get("num_ksi_crashes")) if row is not None else 0,
+                fatality_count=_safe_int(row.get("fatality_count")) if row is not None else 0,
+            )
             coords = _extract_coordinates(row.geometry)[:50] if row is not None else []
             seg_id_int = int(seg_id) if hasattr(seg_id, "__int__") else seg_id
             segment_location = (
@@ -1036,6 +1089,9 @@ def get_safety_aware_route():
                         else "Unknown"
                     ),
                     "risk_label": risk_label,
+                    "num_total_crashes": _safe_int(row.get("num_total_crashes")) if row is not None else 0,
+                    "num_ksi_crashes": _safe_int(row.get("num_ksi_crashes")) if row is not None else 0,
+                    "fatality_count": _safe_int(row.get("fatality_count")) if row is not None else 0,
                 }
             )
 
