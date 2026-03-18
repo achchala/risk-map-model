@@ -12,7 +12,11 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
+
+# Ensure project root is on path when run from any directory
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import numpy as np
 import pandas as pd
@@ -138,26 +142,47 @@ def _log_panel_feature_summary(panel: pd.DataFrame, logger: logging.Logger) -> N
         ws = pd.to_datetime(panel["window_start"])
         logger.info(
             "window_start range: %s to %s, %d unique values",
-            ws.min(), ws.max(), ws.nunique(),
+            ws.min(),
+            ws.max(),
+            ws.nunique(),
         )
         if "hour_of_day" in panel.columns:
-            logger.info("hour_of_day unique values: %s", sorted(panel["hour_of_day"].unique()))
+            logger.info(
+                "hour_of_day unique values: %s", sorted(panel["hour_of_day"].unique())
+            )
         if "day_of_week" in panel.columns:
-            logger.info("day_of_week unique values: %s", sorted(panel["day_of_week"].unique()))
+            logger.info(
+                "day_of_week unique values: %s", sorted(panel["day_of_week"].unique())
+            )
 
     rc_cols = [c for c in panel.columns if c.startswith("road_class_")]
     logger.info("road_class one-hot columns (%d): %s", len(rc_cols), rc_cols)
 
-    for col in ["is_oneway", "from_intersection_degree", "to_intersection_degree",
-                 "segment_length", "hist_crashes_per_year", "hist_crash_hour_ratio",
-                 "hist_crash_weekend_ratio", "is_missing_weather",
-                 "hour_sin", "hour_cos", "dow_sin", "dow_cos",
-                 "season_int", "month_sin", "month_cos"]:
+    for col in [
+        "is_oneway",
+        "from_intersection_degree",
+        "to_intersection_degree",
+        "segment_length",
+        "hist_crashes_per_year",
+        "hist_crash_hour_ratio",
+        "hist_crash_weekend_ratio",
+        "is_missing_weather",
+        "hour_sin",
+        "hour_cos",
+        "dow_sin",
+        "dow_cos",
+        "season_int",
+        "month_sin",
+        "month_cos",
+    ]:
         if col in panel.columns:
             vals = pd.to_numeric(panel[col], errors="coerce")
             logger.info(
                 "  %s: nunique=%d, mean=%.4f, zero%%=%.1f%%",
-                col, vals.nunique(), vals.mean(), 100 * (vals == 0).mean(),
+                col,
+                vals.nunique(),
+                vals.mean(),
+                100 * (vals == 0).mean(),
             )
     logger.info("--- End Feature Summary ---")
 
@@ -210,7 +235,9 @@ def main() -> None:
 
     # 3d) Merge school zone flag (segments within 200m of any school)
     school_locations = load_school_locations(DATA_DIR)
-    road_with_ids = merge_school_zones_into_road_network(road_with_ids, school_locations)
+    road_with_ids = merge_school_zones_into_road_network(
+        road_with_ids, school_locations
+    )
 
     # 3e) Merge TTC transit frequency (sum of avg trips/hour for stops within 150m)
     ttc_stops = load_ttc_gtfs(DATA_DIR)
@@ -320,11 +347,12 @@ def main() -> None:
     logger.info("Saved test results for diagnostics to %s", diagnostics_path)
     test_set_path = reports_dir / "temporal_model_test_set_with_pred.parquet"
     results["test_data_with_pred"].to_parquet(test_set_path, index=False)
-    logger.info("Saved test set with predictions for outlier inspection to %s", test_set_path)
+    logger.info(
+        "Saved test set with predictions for outlier inspection to %s", test_set_path
+    )
 
     logger.info("Temporal model training pipeline completed successfully.")
 
 
 if __name__ == "__main__":
     main()
-
