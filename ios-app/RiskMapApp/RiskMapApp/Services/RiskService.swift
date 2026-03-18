@@ -9,6 +9,7 @@ import Foundation
 import CoreLocation
 import Combine
 
+@MainActor
 class RiskService: ObservableObject {
     @Published var roadSegments: [RoadSegment] = []
     @Published var isLoading = false

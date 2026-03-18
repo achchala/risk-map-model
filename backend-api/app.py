@@ -93,6 +93,67 @@ except Exception as e:
     logging.warning(f"Could not load road network: {e}")
 
 
+# Input validation helper functions
+def validate_bbox_request(data):
+    """Validate bounding box request data"""
+    if not data:
+        return False, "Request body must be JSON"
+
+    required_fields = ['north', 'south', 'east', 'west']
+
+    # Check all required fields present
+    for field in required_fields:
+        if field not in data or data[field] is None:
+            return False, f"Missing required field: {field}"
+
+    # Convert and validate types
+    try:
+        north = float(data['north'])
+        south = float(data['south'])
+        east = float(data['east'])
+        west = float(data['west'])
+    except (ValueError, TypeError):
+        return False, "Coordinates must be valid numbers"
+
+    # Validate bounds logic
+    if north <= south:
+        return False, "North must be greater than south"
+    if east <= west:
+        return False, "East must be greater than west"
+
+    # Validate coordinate ranges
+    if not (-90 <= south <= 90) or not (-90 <= north <= 90):
+        return False, "Latitude must be between -90 and 90"
+    if not (-180 <= west <= 180) or not (-180 <= east <= 180):
+        return False, "Longitude must be between -180 and 180"
+
+    return True, None
+
+
+def validate_point_request(data):
+    """Validate single point request data"""
+    if not data:
+        return False, "Request body must be JSON"
+
+    if 'latitude' not in data or data['latitude'] is None:
+        return False, "Missing required field: latitude"
+    if 'longitude' not in data or data['longitude'] is None:
+        return False, "Missing required field: longitude"
+
+    try:
+        lat = float(data['latitude'])
+        lon = float(data['longitude'])
+    except (ValueError, TypeError):
+        return False, "Coordinates must be valid numbers"
+
+    if not (-90 <= lat <= 90):
+        return False, "Latitude must be between -90 and 90"
+    if not (-180 <= lon <= 180):
+        return False, "Longitude must be between -180 and 180"
+
+    return True, None
+
+
 @app.route("/api/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
@@ -128,10 +189,16 @@ def get_risk_predictions():
 
     try:
         data = request.get_json()
-        north = data.get("north")
-        south = data.get("south")
-        east = data.get("east")
-        west = data.get("west")
+
+        # Validate request
+        valid, error_msg = validate_bbox_request(data)
+        if not valid:
+            return jsonify({"error": error_msg}), 400
+
+        north = float(data["north"])
+        south = float(data["south"])
+        east = float(data["east"])
+        west = float(data["west"])
 
         # use pre-processed data if available
         if preprocessed_data is not None:
@@ -221,6 +288,19 @@ def _extract_coordinates(geometry):
     """Extract coordinates from geometry for JSON serialization"""
     coords = []
     try:
+        # Handle LinearRing explicitly (from Polygon.exterior)
+        if hasattr(geometry, 'geom_type') and geometry.geom_type == 'LinearRing':
+            for coord in geometry.coords:
+                if len(coord) >= 2:
+                    lon, lat = coord[0], coord[1]
+                    coords.append({"latitude": lat, "longitude": lon})
+            return coords
+
+        # Handle Polygon - get exterior coordinates (MUST come before coords check)
+        # Polygon has .coords attribute but accessing it raises NotImplementedError
+        if hasattr(geometry, "exterior"):
+            return _extract_coordinates(geometry.exterior)
+
         # Handle multi-part geometries (MultiLineString, MultiPoint, etc.)
         # Check for 'geoms' attribute first to avoid trying .coords on multi-part geometries
         if hasattr(geometry, "geoms") and geometry.geoms:
@@ -237,9 +317,6 @@ def _extract_coordinates(geometry):
                 if len(coord) >= 2:
                     lon, lat = coord[0], coord[1]
                     coords.append({"latitude": lat, "longitude": lon})
-        # Handle Polygon - get exterior coordinates
-        elif hasattr(geometry, "exterior"):
-            return _extract_coordinates(geometry.exterior)
         # Handle Polygon with xy attribute
         elif hasattr(geometry, "xy"):
             x_coords, y_coords = geometry.xy
@@ -345,8 +422,14 @@ def get_risk_prediction():
 
     try:
         data = request.get_json()
-        lat = data.get("latitude")
-        lon = data.get("longitude")
+
+        # Validate request
+        valid, error_msg = validate_point_request(data)
+        if not valid:
+            return jsonify({"error": error_msg}), 400
+
+        lat = float(data["latitude"])
+        lon = float(data["longitude"])
 
         point = Point(lon, lat)
 
@@ -718,12 +801,20 @@ def get_street_names():
     - query: search query (required, at least 2 characters)
     - limit: maximum number of results (default: 20, max: 100)
     """
-    query = request.args.get("query", "").strip()
-    
+    query = request.args.get("query")
+
+    if query is None:
+        return jsonify({"error": "Missing required parameter: query"}), 400
+
+    query = query.strip()
+
     if len(query) < 2:
-        return jsonify({"suggestions": []})
-    
-    limit = min(int(request.args.get("limit", 20)), 100)
+        return jsonify({"error": "Query must be at least 2 characters"}), 400
+
+    try:
+        limit = min(int(request.args.get("limit", 20)), 100)
+    except (ValueError, TypeError):
+        limit = 20
     
     # Use preprocessed_data if available, otherwise fall back to raw road_network
     data_source = preprocessed_data if preprocessed_data is not None else road_network
@@ -895,13 +986,11 @@ def get_all_segments():
 
         return jsonify(
             {
-                "data": results,
-                "pagination": {
-                    "page": page,
-                    "per_page": per_page,
-                    "total": total,
-                    "total_pages": (total + per_page - 1) // per_page,
-                },
+                "segments": results,
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "total_pages": (total + per_page - 1) // per_page,
             }
         )
 
