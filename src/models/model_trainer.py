@@ -1,18 +1,15 @@
 """
-Model Trainer for Toronto Road Segment Crash Risk Prediction
+Compatibility shim — re-exports all model classes from their respective submodules.
 
-This module handles model training, hyperparameter tuning, and class imbalance.
+Individual models live in:
+  src/models/legacy_classifier/  — ModelTrainer (RandomForest)
+  src/models/temporal_count/     — TemporalCountModelTrainer (HistGBT Poisson)
+  src/models/hurdle/             — HurdleTemporalTrainer (two-stage hurdle)
 """
 
-import pandas as pd
-import numpy as np
-import geopandas as gpd
-from pathlib import Path
-import logging
-import pickle
-import sys
-from typing import Tuple, Dict, Any, Optional
-import warnings
+from .legacy_classifier.model_trainer import ModelTrainer
+from .temporal_count.model_trainer import TemporalCountModelTrainer
+from .hurdle.model_trainer import HurdleTemporalTrainer
 
 warnings.filterwarnings("ignore")
 

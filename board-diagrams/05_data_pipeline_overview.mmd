@@ -1,0 +1,85 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#D6EAF8', 'primaryBorderColor': '#2C5F8A', 'lineColor': '#2C5F8A', 'fontFamily': 'Helvetica Neue, sans-serif'}}}%%
+flowchart TD
+    subgraph Sources["RAW DATA SOURCES"]
+        Collisions["**Toronto Police Collisions**\nExcel, 618K records"]
+        KSI["**Killed / Seriously Injured**\nCSV, 18K records"]
+        Roads["**Centreline Road Network**\nGeoJSON, 65K segments"]
+    end
+
+    subgraph Enrichment["OPTIONAL ENRICHMENT"]
+        Weather["Weather\n(NOAA)"]
+        TMC["TMC Traffic\nVolumes"]
+        School["School\nLocations"]
+        Transit["TTC GTFS\n(Transit)"]
+    end
+
+    subgraph Processing["DATA PROCESSING"]
+        SpatialJoin["**Spatial Join**\nBallTree indexing, UTM projection, 20m buffer\nCrash-to-segment matching | Event-level + Aggregate joins"]
+    end
+
+    subgraph FeatureEng["FEATURE ENGINEERING"]
+        Panel["**Panel Builder**\nConfigurable 1h–24h windows\nTemporal train/val/test split"]
+        FeatGroups["**7 Feature Groups**\n───────────────\n1. Weather (temp, precip, snow, wind)\n2. Road Geometry (length, class, degree)\n3. TMC Exposure (ped/cyclist/vehicle vol)\n4. School / Transit (zones, frequency)\n5. Lag Features (1d, 7d, 30d, rolling)\n6. Historical Profiles (crash/yr, ratios)\n7. Temporal Indicators (sin/cos encoding)"]
+    end
+
+    subgraph Training["MODEL TRAINING"]
+        Split["**Temporal**\nTrain / Val / Test\nSplit"]
+        Hurdle["**Hurdle Model**\n2-stage\nBinary + Poisson"]
+        IsoCal["**Isotonic Calibration**\nStage 1 probs"]
+    end
+
+    subgraph Inference["INFERENCE & SERVING"]
+        Lambda["**Lambda Prediction**\nλ = P_cal × E[n|crash]\nclipped [0, 50]"]
+        Percentile["**Percentile Thresholds**\np70 / p90"]
+        RiskLabels["**Risk Labels**\n🟢 Low / 🟡 Medium / 🔴 High"]
+    end
+
+    subgraph API["API & ROUTING"]
+        BBox["/api/risk-predictions\nSegments in bounding box\n(max 500 segments)"]
+        Single["/api/risk-prediction\nSingle location risk lookup"]
+        Route["/api/routes/safety-aware\nDijkstra: time + risk"]
+    end
+
+    Collisions --> SpatialJoin
+    KSI --> SpatialJoin
+    Roads --> SpatialJoin
+    Weather --> SpatialJoin
+    TMC --> SpatialJoin
+    School --> SpatialJoin
+    Transit --> SpatialJoin
+
+    SpatialJoin --> Panel
+    SpatialJoin --> FeatGroups
+    Panel --> FeatGroups
+    Panel --> Split
+
+    Split --> Hurdle
+    Hurdle --> IsoCal
+
+    IsoCal --> Lambda
+    Lambda --> Percentile
+    Percentile --> RiskLabels
+
+    RiskLabels --> BBox
+    RiskLabels --> Single
+    RiskLabels --> Route
+
+    style Collisions fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style KSI fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style Roads fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style Weather fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style TMC fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style School fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style Transit fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style SpatialJoin fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style Panel fill:#E8DAEF,stroke:#2C5F8A,stroke-width:2px
+    style FeatGroups fill:#E8DAEF,stroke:#2C5F8A,stroke-width:2px
+    style Split fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style Hurdle fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style IsoCal fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style Lambda fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style Percentile fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style RiskLabels fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style BBox fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style Single fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style Route fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px

@@ -1,0 +1,70 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#D6EAF8', 'primaryBorderColor': '#2C5F8A', 'lineColor': '#2C5F8A', 'fontFamily': 'Helvetica Neue, sans-serif'}}}%%
+flowchart TD
+
+    subgraph Client["CLIENT (iOS)"]
+        App["**iOS App (SwiftUI)**\nMapKit + Risk Overlay\nRoute Comparison UI"]
+        HTTP["HTTP Client\nJSON Request/Response\nLocation Services"]
+        App --> HTTP
+    end
+
+    subgraph Server["SERVER (Flask Application)"]
+        direction TB
+
+        subgraph API["API Layer"]
+            Flask["**Flask API + CORS**\n/risk-predictions\n/risk-prediction\n/routes/safety-aware"]
+        end
+
+        subgraph Runtime["Model & Routing"]
+            ModelRT["**Model Runtime**\nTemporalCountModelTrainer\nInference + Calibration\nLambda Computation"]
+            Router["**Routing Engine**\nNetworkX DiGraph\nDijkstra: time + beta*risk"]
+            Spatial["**Spatial Index**\nShapely R-tree\nBounding-box queries\n(max 500 segments)"]
+        end
+
+        subgraph Processing["Data Processing"]
+            Features["**Feature Pipeline**\nPanelBuilder\n7 feature groups\nStandardScaler"]
+            Loader["**Data Loader**\nspatial_join_fast\nBallTree (UTM, 20m)"]
+            Config["**Config**\nCOLLISION_COLUMNS\nKSI_COLUMNS\nPanelConfig"]
+        end
+
+        Flask --> ModelRT
+        Flask --> Router
+        Flask --> Spatial
+        ModelRT --> Features
+        Spatial --> Loader
+        Router --> Features
+        Features --> Loader
+        Config --> Features
+        Config --> Loader
+    end
+
+    subgraph Storage["STORAGE (Filesystem)"]
+        ModelPkl["**Model Artifact**\ntoronto_temporal_count_model.pkl"]
+        Roads["**Road Network**\nCentreline GeoJSON\n65K segments"]
+        Collisions["**Collision Data**\nExcel (618K) + CSV (18K KSI)"]
+        WeatherCSV["**Weather Cache**\nhistoricalweather.csv"]
+        LambdaMap["**Lambda Risk Map**\n(in-memory cache)"]
+    end
+
+    HTTP -- "HTTPS / JSON\nPOST requests" --> Flask
+    Flask -- "GeoJSON\nresponse" --> HTTP
+
+    ModelRT -- "load_model()" --> ModelPkl
+    Loader --> Roads
+    Loader --> Collisions
+    Features --> WeatherCSV
+    ModelRT --> LambdaMap
+
+    style App fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style HTTP fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style Flask fill:#D6EAF8,stroke:#2C5F8A,stroke-width:2px
+    style ModelRT fill:#FADBD8,stroke:#DC143C,stroke-width:2px
+    style Router fill:#E8DAEF,stroke:#2C5F8A,stroke-width:2px
+    style Spatial fill:#E8DAEF,stroke:#2C5F8A,stroke-width:2px
+    style Features fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style Loader fill:#D5F5E3,stroke:#3A9CA0,stroke-width:2px
+    style Config fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style ModelPkl fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style Roads fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style Collisions fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style WeatherCSV fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
+    style LambdaMap fill:#FCF3CF,stroke:#E8833A,stroke-width:2px
