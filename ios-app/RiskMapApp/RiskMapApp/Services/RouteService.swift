@@ -110,8 +110,32 @@ class RouteService: ObservableObject {
             beta: beta
         )
 
-        let optimalRoute = Route(routeOption: response.fastest, routeType: .optimal)
-        let saferRoute = Route(routeOption: response.safer, routeType: .safer)
+        let backendFastestSeconds = response.fastest.summary.totalTravelTimeHours * 3600
+        let backendSaferSeconds = response.safer.summary.totalTravelTimeHours * 3600
+
+        // Calibrate backend free-flow times against MapKit's driving ETA so the app's
+        // displayed duration is closer to Apple/Google navigation times.
+        var etaScale = 1.0
+        if let mapKitFastest = try? await withTimeout(
+            seconds: 15,
+            operation: {
+                try await self.calculateOptimalRoute(from: start, to: destination)
+            }
+        ) {
+            let denom = max(backendFastestSeconds, 1.0)
+            etaScale = max(mapKitFastest.expectedTravelTime / denom, 0.1)
+        }
+
+        let optimalRoute = Route(
+            routeOption: response.fastest,
+            routeType: .optimal,
+            estimatedTimeOverride: backendFastestSeconds * etaScale
+        )
+        let saferRoute = Route(
+            routeOption: response.safer,
+            routeType: .safer,
+            estimatedTimeOverride: backendSaferSeconds * etaScale
+        )
 
         return (optimalRoute, saferRoute)
     }
