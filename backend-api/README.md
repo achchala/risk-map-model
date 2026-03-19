@@ -67,7 +67,7 @@ get risk predictions for a geographic region
 Returns p70, p90 thresholds, risk label descriptions, and optional `featureImportance` for ranking risk drivers.
 
 ### POST `/api/routes/safety-aware`
-Returns fastest and safer route options between origin and destination. Request body: `{ "origin": { "latitude", "longitude" }, "destination": { "latitude", "longitude" }, "beta": 5.0 }`. Higher beta = more risk avoidance.
+Returns fastest and safer route options between origin and destination. Request body: `{ "origin": { "latitude", "longitude" }, "destination": { "latitude", "longitude" }, "beta": 1.0 }`. Higher beta = more risk avoidance.
 
 ### POST `/api/risk-prediction`
 Get risk prediction for a specific location

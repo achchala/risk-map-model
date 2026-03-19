@@ -957,7 +957,7 @@ def get_safety_aware_route():
     {
         "origin": {"latitude": float, "longitude": float},
         "destination": {"latitude": float, "longitude": float},
-        "beta": float (optional, hours per expected crash),
+        "beta": float (optional, risk-avoidance strength),
         "weather": {"condition": str, "temperature": float, ...} (optional, for risk adjustment),
         "time_of_day": {"hour": int, "is_weekend": bool} (optional, for risk adjustment)
     }
@@ -982,7 +982,7 @@ def get_safety_aware_route():
         data = request.get_json()
         origin = data.get("origin", {})
         destination = data.get("destination", {})
-        beta = float(data.get("beta", 5.0))
+        beta = float(data.get("beta", 1.0))
 
         o_lat = origin.get("latitude")
         o_lon = origin.get("longitude")
@@ -1228,7 +1228,7 @@ def get_route_diversity():
     apply_risk_to_edge_costs(
         road_graph,
         lambda_per_hour_latest,
-        beta_hours_per_expected_crash=5.0,
+        beta_hours_per_expected_crash=1.0,
         default_lam_per_hour=default_lam,
     )
 
