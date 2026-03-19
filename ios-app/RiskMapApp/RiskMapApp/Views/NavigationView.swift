@@ -59,11 +59,26 @@ struct RouteNavigationView: View {
 
     var body: some View {
         NavigationView {
-            ZStack {
-                mapView
-                searchAndControlsView
-                routeLegend
-                weatherInfoBadge
+            VStack(spacing: 0) {
+                searchBarView
+                ZStack {
+                    mapView
+                    routeLegend
+                    weatherInfoBadge
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if showRouteComparison, routeService.saferRoute != nil, routeService.optimalRoute != nil {
+                    RouteComparisonCard(
+                        saferRoute: routeService.saferRoute!,
+                        optimalRoute: routeService.optimalRoute!,
+                        selectedRoute: $selectedRoute,
+                        routeSource: routeService.lastRouteSource,
+                        onExportToAppleMaps: { exportToAppleMaps(route: selectedRoute ?? routeService.saferRoute!) },
+                        onExportToGoogleMaps: { exportToGoogleMaps(route: selectedRoute ?? routeService.saferRoute!) },
+                        currentWeather: currentWeather
+                    )
+                    .transition(.move(edge: .bottom))
+                }
             }
             .background(Color(UIColor.systemGroupedBackground))
             .navigationTitle("Navigation")
@@ -95,8 +110,8 @@ struct RouteNavigationView: View {
             .cornerRadius(10)
             .shadow(radius: 5)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(.top, 100)
-            .padding(.leading, 16)
+            .padding(.top, 12)
+            .padding(.leading, 12)
         }
     }
 
@@ -120,6 +135,22 @@ struct RouteNavigationView: View {
     private var routeLegend: some View {
         if routeService.saferRoute != nil || routeService.optimalRoute != nil {
             VStack(alignment: .leading, spacing: 8) {
+                // Routing algorithm indicator
+                HStack(spacing: 6) {
+                    Image(systemName: (routeService.lastRouteSource ?? "") == "backend" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor((routeService.lastRouteSource ?? "") == "backend" ? .green : .orange)
+                        .font(.caption)
+                    Text((routeService.lastRouteSource ?? "") == "backend"
+                         ? "Risk-aware routing active"
+                         : "MapKit fallback (backend unavailable)")
+                        .font(.caption2)
+                        .foregroundColor((routeService.lastRouteSource ?? "") == "backend" ? .green : .orange)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background((routeService.lastRouteSource == "backend" ? Color.green : Color.orange).opacity(0.15))
+                .cornerRadius(6)
+
                 if routeService.optimalRoute != nil {
                     HStack(spacing: 8) {
                         Rectangle().fill(.orange).frame(width: 20, height: 4)
@@ -143,8 +174,8 @@ struct RouteNavigationView: View {
             .background(Color(.systemBackground).opacity(0.9))
             .cornerRadius(10)
             .shadow(radius: 5)
-            .padding(.top, 100)
-            .padding(.trailing, 16)
+            .padding(.top, 12)
+            .padding(.trailing, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
     }
@@ -241,15 +272,6 @@ struct RouteNavigationView: View {
     }
 
     @ViewBuilder
-    private var searchAndControlsView: some View {
-        VStack {
-            searchBarView
-            Spacer()
-            routeComparisonCardView
-        }
-    }
-
-    @ViewBuilder
     private var searchBarView: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -314,21 +336,6 @@ struct RouteNavigationView: View {
         .cornerRadius(12)
         .shadow(radius: 5)
         .padding()
-    }
-
-    @ViewBuilder
-    private var routeComparisonCardView: some View {
-        if showRouteComparison, let safer = routeService.saferRoute, let optimal = routeService.optimalRoute {
-            RouteComparisonCard(
-                saferRoute: safer,
-                optimalRoute: optimal,
-                selectedRoute: $selectedRoute,
-                onExportToAppleMaps: { exportToAppleMaps(route: selectedRoute ?? safer) },
-                onExportToGoogleMaps: { exportToGoogleMaps(route: selectedRoute ?? safer) },
-                currentWeather: currentWeather
-            )
-            .transition(.move(edge: .bottom))
-        }
     }
 
     private func loadWeatherInfo() {
@@ -423,52 +430,14 @@ struct RouteNavigationView: View {
         startItem.name = startPoint.isEmpty ? "Start" : startPoint
         let destItem = MKMapItem(placemark: MKPlacemark(coordinate: dest))
         destItem.name = destination.isEmpty ? "Destination" : destination
-
-        // Apple Maps routing often fails with "Directions Not Available" when given too many stops.
-        // Use at most 10 waypoints so directions are returned reliably (start + 10 + destination = 12 total).
-        let maxWaypoints = 10
-        var mapItems: [MKMapItem] = [startItem]
-
-        let steps = route.steps
-        if !steps.isEmpty {
-            let stepInterval = max(1, steps.count / maxWaypoints)
-            var stopNumber = 1
-            for (index, step) in steps.enumerated() {
-                if index > 0 && index < steps.count - 1 && index % stepInterval == 0 {
-                    let coords = step.polyline.coordinates
-                    if let first = coords.first {
-                        let item = MKMapItem(placemark: MKPlacemark(coordinate: first))
-                        item.name = "Stop \(stopNumber)"
-                        mapItems.append(item)
-                        stopNumber += 1
-                    }
-                }
-            }
-        } else {
-            // Backend route: no MKRoute.steps — sample waypoints from polyline so Apple Maps follows the route
-            let coords = route.polyline.coordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite }
-            guard coords.count >= 2 else {
-                mapItems.append(destItem)
-                MKMapItem.openMaps(with: mapItems, launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
-                return
-            }
-            let n = min(maxWaypoints, coords.count - 2)
-            if n > 0 {
-                let step = Double(coords.count - 1) / Double(n + 1)
-                for i in 1...n {
-                    let idx = Int(round(step * Double(i)))
-                    guard idx > 0 && idx < coords.count else { continue }
-                    let item = MKMapItem(placemark: MKPlacemark(coordinate: coords[idx]))
-                    item.name = "Stop \(mapItems.count)"
-                    mapItems.append(item)
-                }
-            }
+        let waypointCoords = routeShapingWaypoints(for: route, maxWaypoints: 8)
+        let waypointItems = waypointCoords.enumerated().map { index, coord in
+            let item = MKMapItem(placemark: MKPlacemark(coordinate: coord))
+            item.name = "Route waypoint \(index + 1)"
+            return item
         }
-
-        mapItems.append(destItem)
-
         MKMapItem.openMaps(
-            with: Array(mapItems.prefix(25)),
+            with: [startItem] + waypointItems + [destItem],
             launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving]
         )
     }
@@ -476,32 +445,8 @@ struct RouteNavigationView: View {
     private func exportToGoogleMaps(route: Route) {
         guard let start = startCoordinate, let dest = destinationCoordinate else { return }
         let maxWaypoints = 23
-        var waypoints: [String] = []
-
-        let steps = route.steps
-        if !steps.isEmpty {
-            let stepInterval = max(1, steps.count / maxWaypoints)
-            for (index, step) in steps.enumerated() {
-                if index > 0 && index < steps.count - 1 && index % stepInterval == 0 {
-                    let coords = step.polyline.coordinates
-                    if let first = coords.first {
-                        waypoints.append("\(first.latitude),\(first.longitude)")
-                    }
-                }
-            }
-        } else {
-            // Backend route: sample waypoints from polyline
-            let coords = route.polyline.coordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite }
-            if coords.count >= 3 {
-                let n = min(maxWaypoints, coords.count - 2)
-                let step = Double(coords.count - 1) / Double(n + 1)
-                for i in 1...n {
-                    let idx = Int(round(step * Double(i)))
-                    guard idx > 0 && idx < coords.count else { continue }
-                    waypoints.append("\(coords[idx].latitude),\(coords[idx].longitude)")
-                }
-            }
-        }
+        let waypoints = routeShapingWaypoints(for: route, maxWaypoints: maxWaypoints)
+            .map { "\($0.latitude),\($0.longitude)" }
 
         let limited = Array(waypoints.prefix(maxWaypoints))
         var url = "https://www.google.com/maps/dir/?api=1&origin=\(start.latitude),\(start.longitude)&destination=\(dest.latitude),\(dest.longitude)&travelmode=driving"
@@ -512,6 +457,106 @@ struct RouteNavigationView: View {
             UIApplication.shared.open(u)
         }
     }
+
+    private func routeShapingWaypoints(for route: Route, maxWaypoints: Int) -> [CLLocationCoordinate2D] {
+        let coords = route.polyline.coordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite }
+        guard coords.count >= 3, maxWaypoints > 0 else { return [] }
+
+        let minSpacingMeters: CLLocationDistance = 350
+        var selected: [CLLocationCoordinate2D] = []
+        var lastChosen = CLLocation(latitude: coords[0].latitude, longitude: coords[0].longitude)
+
+        // Prefer meaningful bends/turns first so external navigation apps are nudged
+        // toward the selected route shape rather than arbitrary evenly spaced points.
+        for index in 1..<(coords.count - 1) {
+            let prev = coords[index - 1]
+            let curr = coords[index]
+            let next = coords[index + 1]
+
+            let turnAngle = abs(headingDelta(
+                heading(from: prev, to: curr),
+                heading(from: curr, to: next)
+            ))
+            let currLocation = CLLocation(latitude: curr.latitude, longitude: curr.longitude)
+            let spacing = currLocation.distance(from: lastChosen)
+
+            if turnAngle >= 25, spacing >= minSpacingMeters {
+                selected.append(curr)
+                lastChosen = currLocation
+                if selected.count >= maxWaypoints { break }
+            }
+        }
+
+        if selected.count < maxWaypoints {
+            let evenlySpaced = evenlySpacedWaypoints(
+                coordinates: coords,
+                count: maxWaypoints - selected.count
+            )
+            for coord in evenlySpaced {
+                if selected.count >= maxWaypoints { break }
+                if !containsNearbyCoordinate(selected, coord: coord, thresholdMeters: 120) {
+                    selected.append(coord)
+                }
+            }
+        }
+
+        return selected.prefix(maxWaypoints).sorted {
+            routeDistanceAlong(coords, to: $0) < routeDistanceAlong(coords, to: $1)
+        }
+    }
+
+    private func evenlySpacedWaypoints(coordinates: [CLLocationCoordinate2D], count: Int) -> [CLLocationCoordinate2D] {
+        guard coordinates.count >= 3, count > 0 else { return [] }
+        let interior = coordinates.count - 2
+        guard interior > 0 else { return [] }
+
+        let step = Double(coordinates.count - 1) / Double(count + 1)
+        return (1...count).compactMap { i in
+            let idx = Int(round(step * Double(i)))
+            guard idx > 0 && idx < coordinates.count - 1 else { return nil }
+            return coordinates[idx]
+        }
+    }
+
+    private func containsNearbyCoordinate(_ coordinates: [CLLocationCoordinate2D], coord: CLLocationCoordinate2D, thresholdMeters: CLLocationDistance) -> Bool {
+        let location = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        return coordinates.contains {
+            CLLocation(latitude: $0.latitude, longitude: $0.longitude).distance(from: location) < thresholdMeters
+        }
+    }
+
+    private func routeDistanceAlong(_ route: [CLLocationCoordinate2D], to target: CLLocationCoordinate2D) -> CLLocationDistance {
+        guard route.count >= 2 else { return 0 }
+        var total: CLLocationDistance = 0
+        var bestDistance = CLLocationDistance.greatestFiniteMagnitude
+        var bestAlong: CLLocationDistance = 0
+
+        for i in 0..<(route.count - 1) {
+            let start = CLLocation(latitude: route[i].latitude, longitude: route[i].longitude)
+            let end = CLLocation(latitude: route[i + 1].latitude, longitude: route[i + 1].longitude)
+            let segmentDistance = start.distance(from: end)
+            let targetDistance = start.distance(from: CLLocation(latitude: target.latitude, longitude: target.longitude))
+            if targetDistance < bestDistance {
+                bestDistance = targetDistance
+                bestAlong = total
+            }
+            total += segmentDistance
+        }
+        return bestAlong
+    }
+
+    private func heading(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D) -> Double {
+        let dy = end.latitude - start.latitude
+        let dx = end.longitude - start.longitude
+        return atan2(dy, dx) * 180 / .pi
+    }
+
+    private func headingDelta(_ a: Double, _ b: Double) -> Double {
+        var delta = b - a
+        while delta > 180 { delta -= 360 }
+        while delta < -180 { delta += 360 }
+        return delta
+    }
 }
 
 // MARK: - Route Comparison Card
@@ -519,6 +564,7 @@ struct RouteComparisonCard: View {
     let saferRoute: Route
     let optimalRoute: Route
     @Binding var selectedRoute: Route?
+    let routeSource: String?
     let onExportToAppleMaps: () -> Void
     let onExportToGoogleMaps: () -> Void
     let currentWeather: WeatherData?
@@ -532,6 +578,13 @@ struct RouteComparisonCard: View {
         let coordDiff = abs(saferRoute.polyline.coordinates.count - optimalRoute.polyline.coordinates.count)
         let distanceDiff = abs(saferRoute.distance - optimalRoute.distance)
         return coordDiff < max(saferRoute.polyline.coordinates.count, optimalRoute.polyline.coordinates.count) / 10 && distanceDiff < 100
+    }
+
+    private var routesSameMessage: String {
+        if routeSource == "mapkit" {
+            return "Backend routing unavailable — using MapKit fallback. Start the backend (python app.py) and ensure the model is trained, then try routes in Toronto."
+        }
+        return "Only one route available — safest and fastest are the same for this path."
     }
 
     var body: some View {
@@ -552,10 +605,25 @@ struct RouteComparisonCard: View {
             if isExpanded {
                 ScrollView {
                     VStack(spacing: 16) {
+                        // Routing algorithm status
+                        HStack(spacing: 8) {
+                            Image(systemName: (routeSource ?? "") == "backend" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .foregroundColor((routeSource ?? "") == "backend" ? .green : .orange)
+                            Text((routeSource ?? "") == "backend"
+                                 ? "Risk-aware routing: Dijkstra on time + crash risk (Toronto graph)"
+                                 : "MapKit fallback: Backend unavailable — routes may be identical")
+                                .font(.caption)
+                                .foregroundColor((routeSource ?? "") == "backend" ? .secondary : .orange)
+                            Spacer()
+                        }
+                        .padding()
+                        .background((routeSource ?? "") == "backend" ? Color.green.opacity(0.08) : Color.orange.opacity(0.08))
+                        .cornerRadius(8)
+
                         if routesAreSame {
-                            HStack {
+                            HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "info.circle.fill").foregroundColor(.orange)
-                                Text("Only one route available - safest and fastest routes are the same")
+                                Text(routesSameMessage)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }

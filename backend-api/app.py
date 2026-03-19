@@ -20,6 +20,8 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
+import geopandas as gpd
+import networkx as nx
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -35,11 +37,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # model & pipeline imports
 from src.models.model_trainer import TemporalCountModelTrainer, HurdleTemporalTrainer  # type: ignore
 from src.data_processing.data_loader import (
-    load_road_network,
+    load_and_clean_data,
     load_model_dataset,
+    load_road_network,
     merge_model_dataset_into_road_network,
 )
-from src.data_processing.spatial_join_fast import _ensure_stable_segment_id  # type: ignore
+from src.data_processing.spatial_join_fast import (
+    _ensure_stable_segment_id,
+    perform_spatial_join_fast,
+)  # type: ignore
 from src.feature_engineering.panel_builder import PanelConfig  # type: ignore
 from src.routing.road_graph import (  # type: ignore
     build_road_graph,
@@ -122,14 +128,63 @@ latest_window_start = None
 # Percentile thresholds for mapping λ → risk_label (computed when lambda map is built)
 _lambda_p70 = None
 _lambda_p90 = None
+# Cache for apply_risk: skip recompute when (beta, combined_mult) unchanged
+_route_last_beta: Optional[float] = None
+_route_last_combined_mult: Optional[float] = None
 
 try:
     data_dir = PROJECT_ROOT / "data"
-    road_network = load_road_network(data_dir)
-    logging.info(f"Loaded {len(road_network)} road segments")
+    cache_dir = PROJECT_ROOT / "outputs" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    road_cache_path = cache_dir / "road_network_with_crashes.parquet"
+    force_refresh = os.environ.get("FORCE_REFRESH_ROAD_CACHE", "").lower() in ("1", "true", "yes")
 
-    # Ensure stable segment_id and merge ADT/speed for on-demand inference
-    road_network = _ensure_stable_segment_id(road_network)
+    road_network = None
+    # Load road network with crash history: use cache if available (spatial join is slow)
+    if road_cache_path.exists() and not force_refresh:
+        try:
+            road_network = gpd.read_parquet(road_cache_path)
+            n_with_crashes = (
+                int((road_network["num_total_crashes"] > 0).sum())
+                if "num_total_crashes" in road_network.columns
+                else 0
+            )
+            logging.info(
+                f"Loaded {len(road_network)} road segments from cache; {n_with_crashes} with crash history"
+            )
+        except Exception as cache_err:
+            logging.warning(f"Cache load failed: {cache_err}. Rebuilding...")
+            road_cache_path.unlink(missing_ok=True)
+            road_network = None  # fall through to rebuild
+
+    if road_network is None:
+        try:
+            collision_data, ksi_data, road_network = load_and_clean_data(data_dir)
+            road_network = perform_spatial_join_fast(
+                collision_data, ksi_data, road_network
+            )
+            n_with_crashes = (
+                int((road_network["num_total_crashes"] > 0).sum())
+                if "num_total_crashes" in road_network.columns
+                else 0
+            )
+            road_network.to_parquet(road_cache_path, index=False)
+            logging.info(
+                f"Loaded {len(road_network)} road segments; {n_with_crashes} with crash history (cached)"
+            )
+        except Exception as join_err:
+            logging.warning(
+                f"Spatial join failed (crash data may be missing): {join_err}. "
+                "Using road network without crash history."
+            )
+            road_network = load_road_network(data_dir)
+            road_network["num_total_crashes"] = 0
+            road_network["num_ksi_crashes"] = 0
+            road_network["fatality_count"] = 0
+            road_network = _ensure_stable_segment_id(road_network)
+            logging.info(f"Loaded {len(road_network)} road segments (no crash history)")
+
+    # Merge ADT/speed for on-demand inference (segment_id already set by spatial join or _ensure_stable_segment_id)
     model_dataset = load_model_dataset(data_dir)
     road_network = merge_model_dataset_into_road_network(road_network, model_dataset)
 
@@ -568,6 +623,9 @@ def health_check():
     """Health check endpoint. Use to see why risk endpoints may return 500."""
     model_ok = _is_temporal_model_loaded()
     panel_ok = panel_data is not None and not getattr(panel_data, "empty", True)
+    segments_with_crashes = 0
+    if road_network is not None and "num_total_crashes" in road_network.columns:
+        segments_with_crashes = int((road_network["num_total_crashes"] > 0).sum())
     return jsonify(
         {
             "status": "healthy" if road_network is not None else "degraded",
@@ -576,6 +634,7 @@ def health_check():
             "routing_graph_built": road_graph is not None and bool(node_coords),
             "panel_loaded": panel_ok,
             "road_segments": len(road_network) if road_network is not None else 0,
+            "segments_with_crash_history": segments_with_crashes,
             "panel_rows": int(len(panel_data)) if panel_ok else 0,
             "hint": (
                 "Run train_temporal_model.py from project root and ensure outputs/models/toronto_temporal_count_model.pkl and outputs/reports/panel_latest.parquet exist."
@@ -898,7 +957,7 @@ def get_safety_aware_route():
     {
         "origin": {"latitude": float, "longitude": float},
         "destination": {"latitude": float, "longitude": float},
-        "beta": float (optional, hours per expected crash),
+        "beta": float (optional, risk-avoidance strength),
         "weather": {"condition": str, "temperature": float, ...} (optional, for risk adjustment),
         "time_of_day": {"hour": int, "is_weekend": bool} (optional, for risk adjustment)
     }
@@ -923,7 +982,7 @@ def get_safety_aware_route():
         data = request.get_json()
         origin = data.get("origin", {})
         destination = data.get("destination", {})
-        beta = float(data.get("beta", 0.1))
+        beta = float(data.get("beta", 1.0))
 
         o_lat = origin.get("latitude")
         o_lon = origin.get("longitude")
@@ -960,8 +1019,19 @@ def get_safety_aware_route():
                 k: v * combined_mult for k, v in lambda_per_hour_latest.items()
             }
 
-        # Apply λ to edges as expected_crashes and risk-weight
-        apply_risk_to_edge_costs(road_graph, lam_for_routing, beta_hours_per_expected_crash=beta)  # type: ignore[arg-type]
+        # Apply λ to edges. Skip if (beta, combined_mult) unchanged from last request.
+        global _route_last_beta, _route_last_combined_mult
+        if _route_last_beta != beta or _route_last_combined_mult != combined_mult:
+            lam_values = list(lam_for_routing.values()) if lam_for_routing else []
+            default_lam = float(np.median(lam_values)) if lam_values else 0.0
+            apply_risk_to_edge_costs(
+                road_graph,
+                lam_for_routing,
+                beta_hours_per_expected_crash=beta,
+                default_lam_per_hour=default_lam,
+            )  # type: ignore[arg-type]
+            _route_last_beta = beta
+            _route_last_combined_mult = combined_mult
 
         # Snap origin/destination to nearest graph nodes
         try:
@@ -1138,6 +1208,116 @@ def get_safety_aware_route():
 
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/debug/route-diversity", methods=["GET"])
+def get_route_diversity():
+    """
+    Debug: sample OD pairs and report how often fastest != safer, and whether
+    same-path cases are explained by having only one route (route structure).
+    Uses fast connectivity check (remove fastest-path edges, test if alternate exists).
+    """
+    if road_graph is None or node_coords is None or lambda_per_hour_latest is None:
+        return jsonify({"error": "Graph or lambda map not ready"}), 503
+
+    import random
+
+    # Apply risk to edges (same as route endpoint)
+    lam_values = list(lambda_per_hour_latest.values()) if lambda_per_hour_latest else []
+    default_lam = float(np.median(lam_values)) if lam_values else 0.0
+    apply_risk_to_edge_costs(
+        road_graph,
+        lambda_per_hour_latest,
+        beta_hours_per_expected_crash=1.0,
+        default_lam_per_hour=default_lam,
+    )
+
+    nodes = list(road_graph.nodes())
+    if len(nodes) < 2:
+        return jsonify({"error": "Graph has too few nodes"}), 503
+
+    n_samples = 30
+    od_pairs = []
+    seen = set()
+    for _ in range(n_samples * 20):
+        if len(od_pairs) >= n_samples:
+            break
+        u, v = random.sample(nodes, 2)
+        if u == v or (u, v) in seen:
+            continue
+        try:
+            nx.dijkstra_path_length(road_graph, u, v, weight="travel_time_hours")
+            od_pairs.append((u, v))
+            seen.add((u, v))
+        except Exception:
+            continue
+
+    n_differ = 0
+    n_same_single = 0
+    n_same_multi = 0
+
+    for start, end in od_pairs:
+        fastest = find_fastest_route(road_graph, start, end)
+        safer = find_safer_route(road_graph, start, end)
+        fastest_segs = {
+            road_graph[u][v]["segment_id"]
+            for u, v in zip(fastest[:-1], fastest[1:])
+        }
+        safer_segs = {
+            road_graph[u][v]["segment_id"]
+            for u, v in zip(safer[:-1], safer[1:])
+        }
+        if fastest_segs != safer_segs:
+            n_differ += 1
+            continue
+        # Fast check: remove fastest-path edges; if still connected, alternate exists
+        edges_to_remove = list(zip(fastest[:-1], fastest[1:]))
+        G_test = road_graph.copy()
+        for u, v in edges_to_remove:
+            if G_test.has_edge(u, v):
+                G_test.remove_edge(u, v)
+        has_alternate = nx.has_path(G_test, start, end)
+        if has_alternate:
+            n_same_multi += 1
+        else:
+            n_same_single += 1
+
+    total = len(od_pairs)
+    return jsonify({
+        "n_od_pairs_tested": total,
+        "paths_differ": n_differ,
+        "pct_paths_differ": round(100 * n_differ / total, 1) if total else 0,
+        "paths_same_single_route": n_same_single,
+        "paths_same_multi_route": n_same_multi,
+        "interpretation": (
+            "When fastest=safest and single_route: route structure explains it (no alternatives). "
+            "When fastest=safest and multi_route: beta or λ variation may be too small."
+        ),
+    })
+
+
+@app.route("/api/debug/lambda-stats", methods=["GET"])
+def get_lambda_stats():
+    """
+    Debug endpoint: return λ distribution from the latest lambda map.
+    Use to check if any segments have λ = 0.
+    """
+    if lambda_per_hour_latest is None:
+        return jsonify({"error": "Lambda map not computed"}), 503
+    lam_values = np.array(list(lambda_per_hour_latest.values()), dtype=float)
+    n_total = len(lam_values)
+    n_zero = int((lam_values == 0).sum())
+    n_near_zero = int((lam_values < 1e-10).sum())
+    return jsonify({
+        "n_segments": n_total,
+        "n_exactly_zero": n_zero,
+        "pct_exactly_zero": round(100 * n_zero / n_total, 2) if n_total else 0,
+        "n_near_zero_lt_1e10": n_near_zero,
+        "min": float(lam_values.min()),
+        "max": float(lam_values.max()),
+        "mean": float(lam_values.mean()),
+        "median": float(np.median(lam_values)),
+    })
 
 
 @app.route("/api/risk-definition", methods=["GET"])

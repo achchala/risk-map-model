@@ -13,7 +13,7 @@ stable segment identifier, and provides helpers for:
 
 from __future__ import annotations
 
-from typing import Dict, Hashable, Iterable, List, Tuple
+from typing import Dict, Hashable, Iterable, List, Optional, Tuple
 
 import logging
 
@@ -161,6 +161,7 @@ def apply_risk_to_edge_costs(
     G: nx.DiGraph,
     lambda_per_hour: Dict[Hashable, float],
     beta_hours_per_expected_crash: float = 0.1,
+    default_lam_per_hour: Optional[float] = None,
 ) -> None:
     """
     Annotate edges with expected crashes and combined cost.
@@ -168,19 +169,36 @@ def apply_risk_to_edge_costs(
     Parameters:
         G: graph with 'segment_id' and 'travel_time_hours' on each edge
         lambda_per_hour: mapping from segment_id to crash rate λ (crashes/hour)
-        beta_hours_per_expected_crash: coefficient converting expected crashes
-            into time-equivalent hours in the combined weight:
-
-            edge_cost_hours = travel_time_hours + beta * expected_crashes
+        beta_hours_per_expected_crash: risk-avoidance coefficient. Higher values
+            penalize high-λ segments more strongly in the combined weight.
+        default_lam_per_hour: for segments not in lambda_per_hour, use this instead of 0.
+            If None, uses 0 (unknown = zero risk). Use median of known λ to avoid
+            biasing safer path toward segments with no data.
 
     Edge attributes added:
         - expected_crashes
+        - normalized_risk
+        - risk_penalty_hours
         - risk_weight_hours
     """
+    default_lam = float(default_lam_per_hour) if default_lam_per_hour is not None else 0.0
+    positive_lams = np.array(
+        [float(v) for v in lambda_per_hour.values() if float(v) > 0.0],
+        dtype=float,
+    )
+    # Use a typical non-zero λ as the network baseline so routing reacts to
+    # relative risk, not just raw λ magnitudes (which are very small in practice).
+    baseline_lam = (
+        float(np.median(positive_lams))
+        if positive_lams.size > 0
+        else max(default_lam, 1e-12)
+    )
+    baseline_lam = max(baseline_lam, 1e-12)
+
     def _get_lam(seg_id, lam_dict):
         """Look up lambda with type normalization (int/np.int64/float key mismatch)."""
         if seg_id is None:
-            return 0.0
+            return default_lam
         v = lam_dict.get(seg_id, None)
         if v is not None:
             return float(v)
@@ -190,7 +208,7 @@ def apply_risk_to_edge_costs(
                 return float(v)
         except (ValueError, TypeError):
             pass
-        return 0.0
+        return default_lam
 
     for u, v, data in G.edges(data=True):
         seg_id = data.get("segment_id")
@@ -198,8 +216,12 @@ def apply_risk_to_edge_costs(
         lam = _get_lam(seg_id, lambda_per_hour)
 
         expected_crashes = lam * travel_time  # dimensionless expected count
+        normalized_risk = float(np.log1p(max(lam, 0.0) / baseline_lam))
+        risk_penalty_hours = beta_hours_per_expected_crash * travel_time * normalized_risk
         data["expected_crashes"] = expected_crashes
-        data["risk_weight_hours"] = travel_time + beta_hours_per_expected_crash * expected_crashes
+        data["normalized_risk"] = normalized_risk
+        data["risk_penalty_hours"] = risk_penalty_hours
+        data["risk_weight_hours"] = travel_time + risk_penalty_hours
 
 
 def find_fastest_route(

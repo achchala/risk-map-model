@@ -25,6 +25,7 @@ struct LandingView: View {
             VStack(spacing: 0) {
                 Spacer()
 
+                VStack(spacing: 0) {
                 Image(systemName: "map.fill")
                     .font(.system(size: 56))
                     .foregroundStyle(.white.opacity(0.9))
@@ -60,7 +61,10 @@ struct LandingView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 32)
-                .padding(.bottom, 52)
+                }
+                .frame(maxWidth: .infinity)
+
+                Spacer()
             }
         }
     }
