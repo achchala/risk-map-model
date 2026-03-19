@@ -194,12 +194,12 @@ class RiskService: ObservableObject {
     }
 
     /// Fetch safety-aware routes from backend (fastest vs safer - genuinely different routes from graph-based routing).
-    /// - Parameter beta: Balance between speed and safety. Higher = more weight on avoiding risk (0.05 speed, 0.1 balanced, 0.25 safety).
+    /// - Parameter beta: Balance between speed and safety. Higher = more weight on avoiding risk (1 speed, 5 balanced, 25 safety).
     func fetchSafetyAwareRoutes(
         origin: CLLocationCoordinate2D,
         destination: CLLocationCoordinate2D,
         weather: WeatherData? = nil,
-        beta: Double = 0.1
+        beta: Double = 5.0
     ) async throws -> SafetyAwareResponse {
         let urlString = "\(baseURL)/routes/safety-aware"
         guard let url = URL(string: urlString) else { throw APIError.invalidURL }

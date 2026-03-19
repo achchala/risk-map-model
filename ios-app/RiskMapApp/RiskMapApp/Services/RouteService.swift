@@ -15,6 +15,8 @@ class RouteService: ObservableObject {
     @Published var optimalRoute: Route?
     @Published var isLoading = false
     @Published var errorMessage: String?
+    /// "backend" when using Toronto graph routing; "mapkit" when fallback. Use to explain why routes may be identical.
+    @Published var lastRouteSource: String? = nil
 
     private let riskService: RiskService
     private let weatherService: WeatherService
@@ -28,10 +30,22 @@ class RouteService: ObservableObject {
         await MainActor.run {
             isLoading = true
             errorMessage = nil
+            lastRouteSource = nil
         }
 
         do {
-            // Fastest: always MapKit default (user expectation: "the usual fastest route")
+            // Try backend first (Toronto): returns BOTH fastest and safer on same graph for meaningful comparison
+            if let (optimal, safer) = try? await fetchBackendBothRoutes(from: start, to: destination) {
+                await MainActor.run {
+                    self.optimalRoute = optimal
+                    self.saferRoute = safer
+                    self.lastRouteSource = "backend"
+                    self.isLoading = false
+                }
+                return
+            }
+
+            // Fallback: MapKit for both (outside Toronto or backend unavailable)
             let optimalMKRoute = try await withTimeout(seconds: 30) {
                 try await self.calculateOptimalRoute(from: start, to: destination)
             }
@@ -40,22 +54,17 @@ class RouteService: ObservableObject {
                 try await self.analyzeRoute(optimalMKRoute, type: .optimal)
             }
 
-            // Safer: try backend first (graph-based risk routing in Toronto); else MapKit alternates + risk scoring
-            let saferRoute: Route
-            if let backendSafer = try? await fetchBackendSaferRoute(from: start, to: destination, optimalRouteForTimeScaling: optimalRoute) {
-                saferRoute = backendSafer
-            } else {
-                let saferMKRoute = try await withTimeout(seconds: 30) {
-                    try await self.calculateSaferRoute(from: start, to: destination, timePenaltyFactor: self.currentTimePenaltyFactor)
-                }
-                saferRoute = try await withTimeout(seconds: 20) {
-                    try await self.analyzeRoute(saferMKRoute, type: .safer)
-                }
+            let saferMKRoute = try await withTimeout(seconds: 30) {
+                try await self.calculateSaferRoute(from: start, to: destination, timePenaltyFactor: self.currentTimePenaltyFactor)
+            }
+            let saferRoute = try await withTimeout(seconds: 20) {
+                try await self.analyzeRoute(saferMKRoute, type: .safer)
             }
 
             await MainActor.run {
                 self.optimalRoute = optimalRoute
                 self.saferRoute = saferRoute
+                self.lastRouteSource = "mapkit"
                 self.isLoading = false
             }
         } catch {
@@ -82,9 +91,11 @@ class RouteService: ObservableObject {
         SafetySpeedBalance.timePenaltyFromSlider(safetySliderValue)
     }
 
-    /// Fetch safer route from backend (Toronto area). Throws on failure.
-    /// Uses MapKit optimal route's effective speed to correct backend's optimistic travel time (free-flow vs real traffic).
-    private func fetchBackendSaferRoute(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D, optimalRouteForTimeScaling: Route? = nil) async throws -> Route {
+    /// Fetch BOTH fastest and safer routes from backend (Toronto area).
+    /// Using both from the same graph ensures a meaningful comparison: safer should have fewer high-risk segments
+    /// or lower expected crashes than fastest. Previously we compared MapKit fastest vs backend safer (different
+    /// road networks), which could show "safer" with same/more risk and longer time — nonsensical to users.
+    private func fetchBackendBothRoutes(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D) async throws -> (Route, Route) {
         let routeCenter = CLLocationCoordinate2D(
             latitude: (start.latitude + destination.latitude) / 2,
             longitude: (start.longitude + destination.longitude) / 2
@@ -99,15 +110,10 @@ class RouteService: ObservableObject {
             beta: beta
         )
 
-        var estimatedTimeOverride: TimeInterval?
-        if let optimal = optimalRouteForTimeScaling, optimal.distance > 0, optimal.estimatedTime > 0 {
-            let coords = response.safer.fullRouteCoordinates
-            let saferDistance = Route.computeDistanceStatic(coords: coords)
-            let effectiveSpeed = optimal.distance / optimal.estimatedTime
-            estimatedTimeOverride = saferDistance / effectiveSpeed
-        }
+        let optimalRoute = Route(routeOption: response.fastest, routeType: .optimal)
+        let saferRoute = Route(routeOption: response.safer, routeType: .safer)
 
-        return Route(routeOption: response.safer, routeType: .safer, estimatedTimeOverride: estimatedTimeOverride)
+        return (optimalRoute, saferRoute)
     }
 
     private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {

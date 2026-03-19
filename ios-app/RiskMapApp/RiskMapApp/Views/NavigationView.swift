@@ -59,11 +59,26 @@ struct RouteNavigationView: View {
 
     var body: some View {
         NavigationView {
-            ZStack {
-                mapView
-                searchAndControlsView
-                routeLegend
-                weatherInfoBadge
+            VStack(spacing: 0) {
+                searchBarView
+                ZStack {
+                    mapView
+                    routeLegend
+                    weatherInfoBadge
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if showRouteComparison, routeService.saferRoute != nil, routeService.optimalRoute != nil {
+                    RouteComparisonCard(
+                        saferRoute: routeService.saferRoute!,
+                        optimalRoute: routeService.optimalRoute!,
+                        selectedRoute: $selectedRoute,
+                        routeSource: routeService.lastRouteSource,
+                        onExportToAppleMaps: { exportToAppleMaps(route: selectedRoute ?? routeService.saferRoute!) },
+                        onExportToGoogleMaps: { exportToGoogleMaps(route: selectedRoute ?? routeService.saferRoute!) },
+                        currentWeather: currentWeather
+                    )
+                    .transition(.move(edge: .bottom))
+                }
             }
             .background(Color(UIColor.systemGroupedBackground))
             .navigationTitle("Navigation")
@@ -95,8 +110,8 @@ struct RouteNavigationView: View {
             .cornerRadius(10)
             .shadow(radius: 5)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(.top, 100)
-            .padding(.leading, 16)
+            .padding(.top, 12)
+            .padding(.leading, 12)
         }
     }
 
@@ -120,6 +135,22 @@ struct RouteNavigationView: View {
     private var routeLegend: some View {
         if routeService.saferRoute != nil || routeService.optimalRoute != nil {
             VStack(alignment: .leading, spacing: 8) {
+                // Routing algorithm indicator
+                HStack(spacing: 6) {
+                    Image(systemName: (routeService.lastRouteSource ?? "") == "backend" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor((routeService.lastRouteSource ?? "") == "backend" ? .green : .orange)
+                        .font(.caption)
+                    Text((routeService.lastRouteSource ?? "") == "backend"
+                         ? "Risk-aware routing active"
+                         : "MapKit fallback (backend unavailable)")
+                        .font(.caption2)
+                        .foregroundColor((routeService.lastRouteSource ?? "") == "backend" ? .green : .orange)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background((routeService.lastRouteSource == "backend" ? Color.green : Color.orange).opacity(0.15))
+                .cornerRadius(6)
+
                 if routeService.optimalRoute != nil {
                     HStack(spacing: 8) {
                         Rectangle().fill(.orange).frame(width: 20, height: 4)
@@ -143,8 +174,8 @@ struct RouteNavigationView: View {
             .background(Color(.systemBackground).opacity(0.9))
             .cornerRadius(10)
             .shadow(radius: 5)
-            .padding(.top, 100)
-            .padding(.trailing, 16)
+            .padding(.top, 12)
+            .padding(.trailing, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
     }
@@ -241,15 +272,6 @@ struct RouteNavigationView: View {
     }
 
     @ViewBuilder
-    private var searchAndControlsView: some View {
-        VStack {
-            searchBarView
-            Spacer()
-            routeComparisonCardView
-        }
-    }
-
-    @ViewBuilder
     private var searchBarView: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -314,21 +336,6 @@ struct RouteNavigationView: View {
         .cornerRadius(12)
         .shadow(radius: 5)
         .padding()
-    }
-
-    @ViewBuilder
-    private var routeComparisonCardView: some View {
-        if showRouteComparison, let safer = routeService.saferRoute, let optimal = routeService.optimalRoute {
-            RouteComparisonCard(
-                saferRoute: safer,
-                optimalRoute: optimal,
-                selectedRoute: $selectedRoute,
-                onExportToAppleMaps: { exportToAppleMaps(route: selectedRoute ?? safer) },
-                onExportToGoogleMaps: { exportToGoogleMaps(route: selectedRoute ?? safer) },
-                currentWeather: currentWeather
-            )
-            .transition(.move(edge: .bottom))
-        }
     }
 
     private func loadWeatherInfo() {
@@ -519,6 +526,7 @@ struct RouteComparisonCard: View {
     let saferRoute: Route
     let optimalRoute: Route
     @Binding var selectedRoute: Route?
+    let routeSource: String?
     let onExportToAppleMaps: () -> Void
     let onExportToGoogleMaps: () -> Void
     let currentWeather: WeatherData?
@@ -532,6 +540,13 @@ struct RouteComparisonCard: View {
         let coordDiff = abs(saferRoute.polyline.coordinates.count - optimalRoute.polyline.coordinates.count)
         let distanceDiff = abs(saferRoute.distance - optimalRoute.distance)
         return coordDiff < max(saferRoute.polyline.coordinates.count, optimalRoute.polyline.coordinates.count) / 10 && distanceDiff < 100
+    }
+
+    private var routesSameMessage: String {
+        if routeSource == "mapkit" {
+            return "Backend routing unavailable — using MapKit fallback. Start the backend (python app.py) and ensure the model is trained, then try routes in Toronto."
+        }
+        return "Only one route available — safest and fastest are the same for this path."
     }
 
     var body: some View {
@@ -552,10 +567,25 @@ struct RouteComparisonCard: View {
             if isExpanded {
                 ScrollView {
                     VStack(spacing: 16) {
+                        // Routing algorithm status
+                        HStack(spacing: 8) {
+                            Image(systemName: (routeSource ?? "") == "backend" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .foregroundColor((routeSource ?? "") == "backend" ? .green : .orange)
+                            Text((routeSource ?? "") == "backend"
+                                 ? "Risk-aware routing: Dijkstra on time + crash risk (Toronto graph)"
+                                 : "MapKit fallback: Backend unavailable — routes may be identical")
+                                .font(.caption)
+                                .foregroundColor((routeSource ?? "") == "backend" ? .secondary : .orange)
+                            Spacer()
+                        }
+                        .padding()
+                        .background((routeSource ?? "") == "backend" ? Color.green.opacity(0.08) : Color.orange.opacity(0.08))
+                        .cornerRadius(8)
+
                         if routesAreSame {
-                            HStack {
+                            HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "info.circle.fill").foregroundColor(.orange)
-                                Text("Only one route available - safest and fastest routes are the same")
+                                Text(routesSameMessage)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }

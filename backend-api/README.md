@@ -23,6 +23,8 @@ python app.py
 
 The API will be available (for local testing) at `http://localhost:8000`
 
+**First run:** The spatial join (crash data → road segments) runs once and is cached to `outputs/cache/road_network_with_crashes.parquet`. Subsequent starts load from cache (fast). To force rebuild: `FORCE_REFRESH_ROAD_CACHE=1 python app.py`
+
 ## Endpoints
 
 ### GET `/api/health`
@@ -65,7 +67,7 @@ get risk predictions for a geographic region
 Returns p70, p90 thresholds, risk label descriptions, and optional `featureImportance` for ranking risk drivers.
 
 ### POST `/api/routes/safety-aware`
-Returns fastest and safer route options between origin and destination. Request body: `{ "origin": { "latitude", "longitude" }, "destination": { "latitude", "longitude" }, "beta": 0.1 }`.
+Returns fastest and safer route options between origin and destination. Request body: `{ "origin": { "latitude", "longitude" }, "destination": { "latitude", "longitude" }, "beta": 5.0 }`. Higher beta = more risk avoidance.
 
 ### POST `/api/risk-prediction`
 Get risk prediction for a specific location

@@ -46,12 +46,13 @@ enum SafetySpeedBalance: String, CaseIterable {
         }
     }
 
-    /// Beta for backend routing: higher = more weight on avoiding risk
+    /// Beta for backend routing: higher = more weight on avoiding risk.
+    /// Scaled so risk term meaningfully affects path choice (λ ~ 1e-5 to 6e-3).
     var beta: Double {
         switch self {
-        case .speed: return 0.05
-        case .balanced: return 0.1
-        case .safety: return 0.25
+        case .speed: return 1.0
+        case .balanced: return 5.0
+        case .safety: return 25.0
         }
     }
 
@@ -64,9 +65,10 @@ enum SafetySpeedBalance: String, CaseIterable {
         }
     }
 
-    /// Interpolate beta from slider value (0...1)
+    /// Interpolate beta from slider value (0...1). Range 1.0 (speed) to 25.0 (safety).
     static func betaFromSlider(_ value: Double) -> Double {
-        0.05 + value * 0.2 // 0.05 to 0.25
+        let v = max(0, min(1, value))
+        return 1.0 + v * 24.0
     }
 
     /// Interpolate time penalty from slider value (0...1)

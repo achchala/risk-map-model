@@ -13,7 +13,7 @@ stable segment identifier, and provides helpers for:
 
 from __future__ import annotations
 
-from typing import Dict, Hashable, Iterable, List, Tuple
+from typing import Dict, Hashable, Iterable, List, Optional, Tuple
 
 import logging
 
@@ -161,6 +161,7 @@ def apply_risk_to_edge_costs(
     G: nx.DiGraph,
     lambda_per_hour: Dict[Hashable, float],
     beta_hours_per_expected_crash: float = 0.1,
+    default_lam_per_hour: Optional[float] = None,
 ) -> None:
     """
     Annotate edges with expected crashes and combined cost.
@@ -172,15 +173,20 @@ def apply_risk_to_edge_costs(
             into time-equivalent hours in the combined weight:
 
             edge_cost_hours = travel_time_hours + beta * expected_crashes
+        default_lam_per_hour: for segments not in lambda_per_hour, use this instead of 0.
+            If None, uses 0 (unknown = zero risk). Use median of known λ to avoid
+            biasing safer path toward segments with no data.
 
     Edge attributes added:
         - expected_crashes
         - risk_weight_hours
     """
+    default_lam = float(default_lam_per_hour) if default_lam_per_hour is not None else 0.0
+
     def _get_lam(seg_id, lam_dict):
         """Look up lambda with type normalization (int/np.int64/float key mismatch)."""
         if seg_id is None:
-            return 0.0
+            return default_lam
         v = lam_dict.get(seg_id, None)
         if v is not None:
             return float(v)
@@ -190,7 +196,7 @@ def apply_risk_to_edge_costs(
                 return float(v)
         except (ValueError, TypeError):
             pass
-        return 0.0
+        return default_lam
 
     for u, v, data in G.edges(data=True):
         seg_id = data.get("segment_id")
