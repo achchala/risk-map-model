@@ -20,6 +20,7 @@ class RouteService: ObservableObject {
 
     private let riskService: RiskService
     private let weatherService: WeatherService
+    private var activeRouteRequestID = UUID()
 
     init(riskService: RiskService, weatherService: WeatherService = WeatherService()) {
         self.riskService = riskService
@@ -27,39 +28,56 @@ class RouteService: ObservableObject {
     }
 
     func calculateRoutes(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D) async {
+        let requestID = UUID()
         await MainActor.run {
+            self.activeRouteRequestID = requestID
             isLoading = true
             errorMessage = nil
             lastRouteSource = nil
         }
 
         do {
-            // Try backend first (Toronto): returns BOTH fastest and safer on same graph for meaningful comparison
-            if let (optimal, safer) = try? await fetchBackendBothRoutes(from: start, to: destination) {
-                await MainActor.run {
-                    self.optimalRoute = optimal
-                    self.saferRoute = safer
-                    self.lastRouteSource = "backend"
-                    self.isLoading = false
-                }
-                return
-            }
-
-            // Fallback: MapKit for both (outside Toronto or backend unavailable)
+            // Always use MapKit for the fastest route so displayed "fastest" time matches
+            // Apple's ETA. Use backend only for the safer alternative when available.
             let optimalMKRoute = try await withTimeout(seconds: 30) {
                 try await self.calculateOptimalRoute(from: start, to: destination)
             }
 
-            let optimalRoute = try await withTimeout(seconds: 20) {
+            var optimalRoute = try await withTimeout(seconds: 20) {
                 try await self.analyzeRoute(optimalMKRoute, type: .optimal)
             }
+            optimalRoute.estimatedTime = nil
 
+            if let safer = try? await fetchBackendSaferRoute(
+                from: start,
+                to: destination
+            ) {
+                var saferRoute = safer
+                saferRoute.estimatedTime = nil
+                await MainActor.run {
+                    self.optimalRoute = optimalRoute
+                    self.saferRoute = saferRoute
+                    self.lastRouteSource = "backend"
+                    self.isLoading = false
+                }
+                refreshScrapedGoogleMapsETAs(
+                    requestID: requestID,
+                    start: start,
+                    destination: destination,
+                    optimalRoute: optimalRoute,
+                    saferRoute: saferRoute
+                )
+                return
+            }
+
+            // Fallback: MapKit for both (outside Toronto or backend unavailable)
             let saferMKRoute = try await withTimeout(seconds: 30) {
                 try await self.calculateSaferRoute(from: start, to: destination, timePenaltyFactor: self.currentTimePenaltyFactor)
             }
-            let saferRoute = try await withTimeout(seconds: 20) {
+            var saferRoute = try await withTimeout(seconds: 20) {
                 try await self.analyzeRoute(saferMKRoute, type: .safer)
             }
+            saferRoute.estimatedTime = nil
 
             await MainActor.run {
                 self.optimalRoute = optimalRoute
@@ -67,11 +85,82 @@ class RouteService: ObservableObject {
                 self.lastRouteSource = "mapkit"
                 self.isLoading = false
             }
+            refreshScrapedGoogleMapsETAs(
+                requestID: requestID,
+                start: start,
+                destination: destination,
+                optimalRoute: optimalRoute,
+                saferRoute: saferRoute
+            )
         } catch {
             await MainActor.run {
                 self.errorMessage = error.localizedDescription
                 self.isLoading = false
             }
+        }
+    }
+
+    private func refreshScrapedGoogleMapsETAs(
+        requestID: UUID,
+        start: CLLocationCoordinate2D,
+        destination: CLLocationCoordinate2D,
+        optimalRoute: Route,
+        saferRoute: Route
+    ) {
+        Task { [weak self] in
+            guard let self else { return }
+            let scrapedETAs = await self.fetchScrapedGoogleMapsETAs(
+                from: start,
+                to: destination,
+                optimalRoute: optimalRoute,
+                saferRoute: saferRoute
+            )
+            guard scrapedETAs.fastest != nil || scrapedETAs.safer != nil else {
+                return
+            }
+            await MainActor.run {
+                guard self.activeRouteRequestID == requestID else { return }
+                if var updatedOptimal = self.optimalRoute, let fastestETA = scrapedETAs.fastest {
+                    updatedOptimal.estimatedTime = fastestETA
+                    self.optimalRoute = updatedOptimal
+                }
+                if var updatedSafer = self.saferRoute, let saferETA = scrapedETAs.safer {
+                    updatedSafer.estimatedTime = saferETA
+                    self.saferRoute = updatedSafer
+                }
+            }
+        }
+    }
+
+    private func fetchScrapedGoogleMapsETAs(
+        from start: CLLocationCoordinate2D,
+        to destination: CLLocationCoordinate2D,
+        optimalRoute: Route,
+        saferRoute: Route
+    ) async -> (fastest: TimeInterval?, safer: TimeInterval?) {
+        var namedURLs: [String: String] = [:]
+        if let fastestURL = optimalRoute.googleMapsURL(origin: start, destination: destination) {
+            namedURLs["fastest"] = fastestURL
+        }
+        if let saferURL = saferRoute.googleMapsURL(origin: start, destination: destination) {
+            namedURLs["safer"] = saferURL
+        }
+        guard !namedURLs.isEmpty else {
+            return (nil, nil)
+        }
+
+        do {
+            let response = try await withTimeout(seconds: 35) {
+                try await self.riskService.fetchGoogleMapsETAs(namedURLs: namedURLs)
+            }
+            print("[google-eta] applying scraped ETAs fastest=\(String(describing: response.etasSeconds["fastest"])) safer=\(String(describing: response.etasSeconds["safer"]))")
+            return (
+                response.etasSeconds["fastest"],
+                response.etasSeconds["safer"]
+            )
+        } catch {
+            print("[google-eta] scrape request failed: \(error.localizedDescription)")
+            return (nil, nil)
         }
     }
 
@@ -91,11 +180,12 @@ class RouteService: ObservableObject {
         SafetySpeedBalance.timePenaltyFromSlider(safetySliderValue)
     }
 
-    /// Fetch BOTH fastest and safer routes from backend (Toronto area).
-    /// Using both from the same graph ensures a meaningful comparison: safer should have fewer high-risk segments
-    /// or lower expected crashes than fastest. Previously we compared MapKit fastest vs backend safer (different
-    /// road networks), which could show "safer" with same/more risk and longer time — nonsensical to users.
-    private func fetchBackendBothRoutes(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D) async throws -> (Route, Route) {
+    /// Fetch the backend safer route while keeping MapKit as the source of truth for the
+    /// fastest route and its ETA.
+    private func fetchBackendSaferRoute(
+        from start: CLLocationCoordinate2D,
+        to destination: CLLocationCoordinate2D
+    ) async throws -> Route {
         let routeCenter = CLLocationCoordinate2D(
             latitude: (start.latitude + destination.latitude) / 2,
             longitude: (start.longitude + destination.longitude) / 2
@@ -110,34 +200,13 @@ class RouteService: ObservableObject {
             beta: beta
         )
 
-        let backendFastestSeconds = response.fastest.summary.totalTravelTimeHours * 3600
-        let backendSaferSeconds = response.safer.summary.totalTravelTimeHours * 3600
-
-        // Calibrate backend free-flow times against MapKit's driving ETA so the app's
-        // displayed duration is closer to Apple/Google navigation times.
-        var etaScale = 1.0
-        if let mapKitFastest = try? await withTimeout(
-            seconds: 15,
-            operation: {
-                try await self.calculateOptimalRoute(from: start, to: destination)
-            }
-        ) {
-            let denom = max(backendFastestSeconds, 1.0)
-            etaScale = max(mapKitFastest.expectedTravelTime / denom, 0.1)
-        }
-
-        let optimalRoute = Route(
-            routeOption: response.fastest,
-            routeType: .optimal,
-            estimatedTimeOverride: backendFastestSeconds * etaScale
-        )
         let saferRoute = Route(
             routeOption: response.safer,
             routeType: .safer,
-            estimatedTimeOverride: backendSaferSeconds * etaScale
+            estimatedTimeOverride: nil
         )
 
-        return (optimalRoute, saferRoute)
+        return saferRoute
     }
 
     private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {

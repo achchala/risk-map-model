@@ -183,6 +183,11 @@ struct SafetyAwareResponse: Codable {
     let betaHoursPerExpectedCrash: Double
 }
 
+struct GoogleMapsETAResponse: Codable {
+    let etasSeconds: [String: Double]
+    let failures: [String: String]
+}
+
 struct RiskDefinitionResponse: Codable {
     let p70: Double
     let p90: Double
@@ -198,7 +203,7 @@ struct RiskDefinitionResponse: Codable {
 struct Route: Identifiable {
     let id = UUID()
     let polyline: MKPolyline
-    let estimatedTime: TimeInterval
+    var estimatedTime: TimeInterval?
     let distance: CLLocationDistance
     let riskScore: Double
     let highRiskSegments: Int
@@ -231,8 +236,7 @@ struct Route: Identifiable {
         let coords = routeOption.fullRouteCoordinates
         self.polyline = MKPolyline(coordinates: coords, count: coords.count)
         self.distance = Self.computeDistance(coords: coords)
-        let backendTime = routeOption.summary.totalTravelTimeHours * 3600
-        self.estimatedTime = estimatedTimeOverride ?? backendTime
+        self.estimatedTime = estimatedTimeOverride
         let high = routeOption.summary.highRiskSegments ?? 0
         let med = routeOption.summary.mediumRiskSegments ?? 0
         let low = routeOption.summary.lowRiskSegments ?? 0
@@ -267,6 +271,74 @@ struct Route: Identifiable {
         polyline.coordinates
     }
 
+    func shapingWaypoints(maxWaypoints: Int) -> [CLLocationCoordinate2D] {
+        Self.shapingWaypointsForCoordinates(detailedCoordinates, maxWaypoints: maxWaypoints)
+    }
+
+    func googleMapsURL(
+        origin: CLLocationCoordinate2D,
+        destination: CLLocationCoordinate2D,
+        maxWaypoints: Int = 8
+    ) -> String? {
+        let waypoints = shapingWaypoints(maxWaypoints: maxWaypoints)
+            .map { "\($0.latitude),\($0.longitude)" }
+        var url = "https://www.google.com/maps/dir/?api=1&origin=\(origin.latitude),\(origin.longitude)&destination=\(destination.latitude),\(destination.longitude)&travelmode=driving"
+        if !waypoints.isEmpty {
+            url += "&waypoints=\(waypoints.joined(separator: "|"))"
+        }
+        return url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+    }
+
+    static func shapingWaypointsForCoordinates(_ coordinates: [CLLocationCoordinate2D], maxWaypoints: Int) -> [CLLocationCoordinate2D] {
+        let coords = coordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite }
+        guard coords.count >= 3, maxWaypoints > 0 else { return [] }
+
+        let minSpacingMeters: CLLocationDistance = 350
+        var selectedIndices: [Int] = []
+        var lastChosen = CLLocation(latitude: coords[0].latitude, longitude: coords[0].longitude)
+
+        // Prefer meaningful bends/turns first so external navigation apps are nudged
+        // toward the selected route shape rather than arbitrary evenly spaced points.
+        for index in 1..<(coords.count - 1) {
+            let prev = coords[index - 1]
+            let curr = coords[index]
+            let next = coords[index + 1]
+
+            let turnAngle = abs(routeHeadingDelta(
+                routeHeading(from: prev, to: curr),
+                routeHeading(from: curr, to: next)
+            ))
+            let currLocation = CLLocation(latitude: curr.latitude, longitude: curr.longitude)
+            let spacing = currLocation.distance(from: lastChosen)
+
+            if turnAngle >= 25, spacing >= minSpacingMeters {
+                selectedIndices.append(index)
+                lastChosen = currLocation
+                if selectedIndices.count >= maxWaypoints { break }
+            }
+        }
+
+        if selectedIndices.count < maxWaypoints {
+            let evenlySpacedIndices = evenlySpacedWaypointIndices(
+                coordinates: coords,
+                count: maxWaypoints - selectedIndices.count
+            )
+            for index in evenlySpacedIndices {
+                if selectedIndices.count >= maxWaypoints { break }
+                let coord = coords[index]
+                let existingCoords = selectedIndices.map { coords[$0] }
+                if !containsNearbyCoordinate(existingCoords, coord: coord, thresholdMeters: 120) {
+                    selectedIndices.append(index)
+                }
+            }
+        }
+
+        return selectedIndices
+            .prefix(maxWaypoints)
+            .sorted()
+            .map { coords[$0] }
+    }
+
     func safetyExplanation(comparedTo optimalRoute: Route?) -> String {
         var reasons: [String] = []
         if let optimal = optimalRoute {
@@ -292,16 +364,52 @@ struct Route: Identifiable {
     }
 }
 
+private func evenlySpacedWaypointIndices(coordinates: [CLLocationCoordinate2D], count: Int) -> [Int] {
+    guard coordinates.count >= 3, count > 0 else { return [] }
+    let step = Double(coordinates.count - 1) / Double(count + 1)
+    return (1...count).compactMap { i in
+        let idx = Int(round(step * Double(i)))
+        guard idx > 0 && idx < coordinates.count - 1 else { return nil }
+        return idx
+    }
+}
+
+private func containsNearbyCoordinate(_ coordinates: [CLLocationCoordinate2D], coord: CLLocationCoordinate2D, thresholdMeters: CLLocationDistance) -> Bool {
+    let location = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+    return coordinates.contains {
+        CLLocation(latitude: $0.latitude, longitude: $0.longitude).distance(from: location) < thresholdMeters
+    }
+}
+
+private func routeHeading(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D) -> Double {
+    let dy = end.latitude - start.latitude
+    let dx = end.longitude - start.longitude
+    return atan2(dy, dx) * 180 / .pi
+}
+
+private func routeHeadingDelta(_ a: Double, _ b: Double) -> Double {
+    var delta = b - a
+    while delta > 180 { delta -= 360 }
+    while delta < -180 { delta += 360 }
+    return delta
+}
+
 struct RouteComparison {
     let saferRoute: Route
     let optimalRoute: Route
 
-    var timeDifference: TimeInterval {
-        abs(saferRoute.estimatedTime - optimalRoute.estimatedTime)
+    var timeDifference: TimeInterval? {
+        guard let saferETA = saferRoute.estimatedTime, let fastestETA = optimalRoute.estimatedTime else {
+            return nil
+        }
+        return abs(saferETA - fastestETA)
     }
 
-    var saferRouteSlower: Bool {
-        saferRoute.estimatedTime > optimalRoute.estimatedTime
+    var saferRouteSlower: Bool? {
+        guard let saferETA = saferRoute.estimatedTime, let fastestETA = optimalRoute.estimatedTime else {
+            return nil
+        }
+        return saferETA > fastestETA
     }
 
     var safetyImprovement: String {
