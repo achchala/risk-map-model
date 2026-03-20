@@ -28,6 +28,9 @@ from src.routing.road_graph import (
     build_road_graph,
     apply_risk_to_edge_costs,
     calculate_route_risk,
+    find_fastest_route,
+    find_safer_route,
+    path_edges,
 )
 
 
@@ -205,4 +208,111 @@ def test_routing_risk_and_time_aggregation_math():
     assert np.isclose(
         summary["route_probability"], manual_prob
     ), "Route probability must be 1 - exp(-Σ(λ_i * t_i))."
+
+
+def test_fastest_and_safer_differ_when_alternatives_exist():
+    """
+    When the graph has multiple paths and segments have different λ,
+    find_fastest_route and find_safer_route must return different paths.
+    """
+    from shapely.geometry import LineString
+
+    # Diamond graph: A (10->20->30) fast but high-risk, B (10->40->30) slower but low-risk
+    roads = gpd.GeoDataFrame(
+        {
+            "CENTRELINE_ID": [1, 2, 3, 4],
+            "FROM_INTERSECTION_ID": [10, 20, 10, 40],
+            "TO_INTERSECTION_ID": [20, 30, 40, 30],
+            "ROAD_CLASS": ["arterial", "arterial", "local", "local"],
+            "segment_length": [100.0, 100.0, 200.0, 200.0],
+            "geometry": [
+                LineString([(0.0, 0.0), (0.001, 0.0)]),
+                LineString([(0.001, 0.0), (0.002, 0.0)]),
+                LineString([(0.0, 0.0), (0.001, 0.001)]),
+                LineString([(0.001, 0.001), (0.002, 0.0)]),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+
+    G = build_road_graph(roads)
+
+    # Path A (seg 1,2): short, high λ. Path B (seg 3,4): longer, low λ.
+    lam = {1: 50.0, 2: 50.0, 3: 0.01, 4: 0.01}
+    apply_risk_to_edge_costs(G, lam, beta_hours_per_expected_crash=0.1)
+
+    fastest = find_fastest_route(G, 10, 30)
+    safer = find_safer_route(G, 10, 30)
+
+    fastest_seg_ids = [G[u][v]["segment_id"] for u, v in zip(fastest[:-1], fastest[1:])]
+    safer_seg_ids = [G[u][v]["segment_id"] for u, v in zip(safer[:-1], safer[1:])]
+
+    assert fastest_seg_ids != safer_seg_ids, (
+        "Fastest and safer must differ when path A is faster but riskier and path B is slower but safer. "
+        "Fastest should prefer 1,2 (short); safer should prefer 3,4 (low λ)."
+    )
+
+
+def test_fastest_and_safer_differ_with_production_scale_lambda():
+    """
+    Routing must still diverge when λ magnitudes are tiny (as in production)
+    but one path is meaningfully riskier than another.
+    """
+    from shapely.geometry import LineString
+
+    roads = gpd.GeoDataFrame(
+        {
+            "CENTRELINE_ID": [1, 2, 3, 4],
+            "FROM_INTERSECTION_ID": [10, 20, 10, 40],
+            "TO_INTERSECTION_ID": [20, 30, 40, 30],
+            "ROAD_CLASS": ["arterial", "arterial", "local", "local"],
+            "segment_length": [100.0, 100.0, 170.0, 170.0],
+            "geometry": [
+                LineString([(0.0, 0.0), (0.001, 0.0)]),
+                LineString([(0.001, 0.0), (0.002, 0.0)]),
+                LineString([(0.0, 0.0), (0.001, 0.001)]),
+                LineString([(0.001, 0.001), (0.002, 0.0)]),
+            ],
+        },
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+
+    G = build_road_graph(roads)
+
+    # Path A: faster but much riskier, using λ magnitudes similar to production.
+    lam = {1: 0.004, 2: 0.004, 3: 0.00001, 4: 0.00001}
+    apply_risk_to_edge_costs(G, lam, beta_hours_per_expected_crash=1.0)
+
+    fastest = find_fastest_route(G, 10, 30)
+    safer = find_safer_route(G, 10, 30)
+
+    fastest_seg_ids = [G[u][v]["segment_id"] for u, v in zip(fastest[:-1], fastest[1:])]
+    safer_seg_ids = [G[u][v]["segment_id"] for u, v in zip(safer[:-1], safer[1:])]
+
+    assert fastest_seg_ids != safer_seg_ids, (
+        "With production-scale λ values, the safer route should still diverge "
+        "from the fastest route when alternatives exist."
+    )
+
+
+def test_fastest_equals_safer_when_beta_zero_or_single_path():
+    """
+    When beta=0, risk_weight = travel_time, so fastest and safer are identical.
+    When there is only one path, both return that path.
+    """
+    roads, _ = _dummy_data_for_tests()
+    roads = roads.copy()
+    roads["segment_id"] = roads["CENTRELINE_ID"]
+    G = build_road_graph(roads)
+
+    # Single path 10->20->30; beta=0 makes risk_weight = travel_time
+    lam = {1: 0.1, 2: 0.2}
+    apply_risk_to_edge_costs(G, lam, beta_hours_per_expected_crash=0.0)
+
+    fastest = find_fastest_route(G, 10, 30)
+    safer = find_safer_route(G, 10, 30)
+
+    assert fastest == safer, "With beta=0, fastest and safer must be identical."
 

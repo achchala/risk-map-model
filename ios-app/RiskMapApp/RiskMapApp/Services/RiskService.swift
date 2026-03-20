@@ -242,6 +242,32 @@ class RiskService: ObservableObject {
 
         return try JSONDecoder().decode(SafetyAwareResponse.self, from: data)
     }
+
+    func fetchGoogleMapsETAs(namedURLs: [String: String]) async throws -> GoogleMapsETAResponse {
+        let urlString = "\(baseURL)/debug/google-maps-eta"
+        guard let url = URL(string: urlString) else { throw APIError.invalidURL }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 90.0
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["urls": namedURLs])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.serverError("Invalid response")
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            let serverMessage = Self.parseServerError(from: data) ?? "Status code: \(httpResponse.statusCode)"
+            throw APIError.serverError(serverMessage)
+        }
+
+        let decoded = try JSONDecoder().decode(GoogleMapsETAResponse.self, from: data)
+        print("[google-eta] backend response etasSeconds=\(decoded.etasSeconds) failures=\(decoded.failures)")
+        return decoded
+    }
 }
 
 // mapkit import

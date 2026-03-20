@@ -5,6 +5,7 @@ serves risk predictions from the trained model
 
 # Reduce chance of double-free in numpy/OpenBLAS/MKL (set before any numeric imports)
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Ensure a usable temp dir (scipy/sklearn need it). Fixes "No usable temporary directory" on some systems.
 _fallback_tmp = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp"))
@@ -21,10 +22,13 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 import geopandas as gpd
+import json
 import networkx as nx
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import re
+import subprocess
 from typing import Optional
 import logging
 import sys
@@ -1317,6 +1321,153 @@ def get_lambda_stats():
         "max": float(lam_values.max()),
         "mean": float(lam_values.mean()),
         "median": float(np.median(lam_values)),
+    })
+
+
+def _google_duration_text_to_seconds(text: str) -> Optional[float]:
+    normalized = (
+        str(text)
+        .lower()
+        .replace("hours", "hr")
+        .replace("hour", "hr")
+        .replace("minutes", "min")
+        .replace("minute", "min")
+        .strip()
+    )
+    if not normalized:
+        return None
+    hours = 0
+    minutes = 0
+    hr_match = re.search(r"(\d+)\s*hr", normalized)
+    min_match = re.search(r"(\d+)\s*min", normalized)
+    if hr_match:
+        hours = int(hr_match.group(1))
+    if min_match:
+        minutes = int(min_match.group(1))
+    total_seconds = float(hours * 3600 + minutes * 60)
+    return total_seconds if total_seconds > 0 else None
+
+
+def _format_duration_seconds(seconds: float) -> str:
+    total_minutes = int(round(seconds / 60.0))
+    hours, minutes = divmod(total_minutes, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def _scrape_google_maps_eta(url: str, timeout_seconds: int = 45, label: str = "route") -> dict:
+    script_path = PROJECT_ROOT / "scripts" / "scrape_google_maps_eta.py"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Scraper script not found: {script_path}")
+
+    logging.info("[google-eta] START %s scrape", label)
+    completed = subprocess.run(
+        [sys.executable, str(script_path), url, "--timeout", str(timeout_seconds)],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds + 20,
+        check=False,
+    )
+
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip() or "Unknown scraper error"
+        logging.warning("[google-eta] FAIL %s scrape: %s", label, stderr)
+        raise RuntimeError(stderr)
+
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        logging.warning("[google-eta] FAIL %s scrape: invalid JSON", label)
+        raise RuntimeError("Scraper returned invalid JSON") from exc
+
+    best_guess = payload.get("best_guess") or {}
+    seconds = None
+    if best_guess.get("minutes") is not None:
+        parsed_seconds = float(best_guess["minutes"]) * 60.0
+        if parsed_seconds > 0:
+            seconds = parsed_seconds
+    if seconds is None:
+        seconds = _google_duration_text_to_seconds(best_guess.get("text", ""))
+
+    if seconds is None:
+        logging.warning(
+            "[google-eta] FAIL %s scrape: no ETA found (candidate_count=%s)",
+            label,
+            payload.get("candidate_count", 0),
+        )
+        raise RuntimeError("No ETA found in scraper output")
+
+    logging.info(
+        "[google-eta] SUCCESS %s scrape: %s from '%s' (candidates=%s)",
+        label,
+        _format_duration_seconds(seconds),
+        best_guess.get("text", ""),
+        payload.get("candidate_count", 0),
+    )
+    return {
+        "seconds": seconds,
+        "best_guess": best_guess,
+        "candidate_count": payload.get("candidate_count", 0),
+        "url": payload.get("url", url),
+    }
+
+
+@app.route("/api/debug/google-maps-eta", methods=["POST"])
+def debug_google_maps_eta():
+    """
+    Dev/debug endpoint that scrapes ETA text from Google Maps direction URLs.
+    Expected JSON body:
+      { "urls": { "fastest": "<url>", "safer": "<url>" } }
+    """
+    body = request.get_json(silent=True) or {}
+    urls = body.get("urls")
+    if not isinstance(urls, dict) or not urls:
+        return jsonify({"error": "Request body must include a non-empty 'urls' object"}), 400
+    logging.info("[google-eta] REQUEST received for routes: %s", ", ".join(sorted(map(str, urls.keys()))))
+
+    etas_seconds = {}
+    failures = {}
+    details = {}
+
+    valid_items = []
+    for name, url in urls.items():
+        if not isinstance(name, str) or not isinstance(url, str) or not url.strip():
+            failures[str(name)] = "Invalid URL payload"
+            continue
+        valid_items.append((name, url.strip()))
+
+    with ThreadPoolExecutor(max_workers=max(1, min(4, len(valid_items)))) as executor:
+        future_to_name = {
+            executor.submit(_scrape_google_maps_eta, url, 45, name): name for name, url in valid_items
+        }
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                scraped = future.result()
+                etas_seconds[name] = float(scraped["seconds"])
+                details[name] = {
+                    "best_guess": scraped["best_guess"],
+                    "candidate_count": scraped["candidate_count"],
+                    "url": scraped["url"],
+                }
+            except subprocess.TimeoutExpired:
+                failures[name] = "Timed out scraping Google Maps"
+                logging.warning("[google-eta] FAIL %s scrape: timed out", name)
+            except Exception as exc:
+                failures[name] = str(exc)
+                logging.warning("[google-eta] FAIL %s scrape: %s", name, exc)
+
+    logging.info(
+        "[google-eta] RESPONSE etas=%s failures=%s",
+        {k: _format_duration_seconds(v) for k, v in etas_seconds.items()},
+        failures,
+    )
+
+    return jsonify({
+        "etasSeconds": etas_seconds,
+        "failures": failures,
+        "details": details,
     })
 
 
