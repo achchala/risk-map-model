@@ -164,7 +164,20 @@ def _lambda_to_risk_label(lam: float) -> str:
     """
     Map λ (crashes per hour) to risk_label (low/medium/high) using percentile thresholds.
 
-    Uses precomputed _lambda_p70, _lambda_p90 from the full λ distribution.
+    PHASE 5 — MAP DISPLAY (RISK COLOR LABELS)
+    Each road segment on the map is colored low/medium/high based on how its λ
+    compares to the distribution of all λ values across the city.
+
+    Thresholds are relative (percentile-based), not absolute:
+        low    → λ ≤ p70  (bottom 70% of all segments)
+        medium → λ ≤ p90  (70th–90th percentile)
+        high   → λ > p90  (top 10% most dangerous segments)
+
+    This means "high risk" always means top 10% of Toronto's roads — the labels
+    adapt to the model's output distribution rather than a fixed crash-rate value.
+
+    Uses precomputed _lambda_p70, _lambda_p90 from the full λ distribution
+    (computed once at startup in _compute_lambda_map_for_latest_window).
     """
     global _lambda_p70, _lambda_p90
     if _lambda_p70 is None or _lambda_p90 is None:
@@ -180,8 +193,21 @@ def _compute_lambda_map_for_latest_window():
     """
     Compute λ_per_hour for each segment in the most recent panel window.
 
-    This is used to annotate routing edges with expected crashes and to derive
-    risk_label for the iOS app (temporal model replaces classification model).
+    PHASE 1 — ML λ MAP
+    Called once at startup (and lazily on first request if startup failed).
+    Runs the Hurdle-Temporal model over the latest snapshot of panel features
+    to produce a crash rate prediction for every road segment.
+
+    λ (lambda) = expected crashes per hour on a given segment.
+    It is derived from the model's raw window-level prediction divided by
+    the panel window duration in hours:
+        λ_per_hour = predict_lambda(X) / window_size_hours
+
+    The resulting dict (segment_id → λ) is used for:
+        1. Routing — applied as risk weights on edges (Phases 2–3)
+        2. Map display — converted to low/medium/high labels (Phase 5)
+
+    Also computes p70/p90 percentile thresholds used by _lambda_to_risk_label().
     """
     global lambda_per_hour_latest, latest_window_start, _lambda_p70, _lambda_p90
 
@@ -710,7 +736,32 @@ def get_risk_predictions():
 def _route_risk_multipliers(weather_data, time_data):
     """
     Return (weather_mult, time_mult) for route risk adjustment.
-    Each is >= 0; 1.0 means no change. Used when app sends live weather/time for safety-aware routing.
+
+    PHASE 2 — RISK MULTIPLIERS
+    Before running Dijkstra, every segment's λ (crash rate) is scaled by a
+    combined multiplier: λ_adjusted = λ × weather_mult × time_mult
+
+    This means in bad weather or at risky hours, the safer route will avoid
+    more segments than it normally would — because all λ values are higher,
+    so the risk penalty on every edge is larger.
+
+    These are heuristic values, NOT learned from data. They shift route
+    decisions only — they do not affect the raw risk labels shown on the map.
+
+    Each multiplier is >= 1.0; 1.0 means no change.
+
+    Weather multipliers (from worst to least):
+        snow / thunderstorm → 1.5×   (highest danger)
+        sleet               → 1.4×
+        rain                → 1.35×
+        fog / mist          → 1.2×
+        clear               → 1.0×   (no adjustment)
+
+    Time-of-day multipliers:
+        late night (23:00–05:00)  → 1.3×   (low visibility, impaired drivers)
+        rush hour weekday         → 1.25×  (high volume, more conflicts)
+        rush hour weekend         → 1.1×   (lighter but still elevated)
+        all other hours           → 1.0×   (no adjustment)
     """
     weather_mult = 1.0
     if weather_data and isinstance(weather_data, dict):
@@ -732,8 +783,9 @@ def _route_risk_multipliers(weather_data, time_data):
             try:
                 h = int(hour)
                 if h >= 23 or h < 5:
-                    time_mult = 1.3
+                    time_mult = 1.3   # late night: low light, more impaired drivers
                 elif (7 <= h <= 9) or (17 <= h <= 19):
+                    # rush hour: higher on weekdays due to volume
                     time_mult = 1.25 if not time_data.get("is_weekend") else 1.1
             except (TypeError, ValueError):
                 pass
@@ -940,30 +992,38 @@ def get_safety_aware_route():
                 400,
             )
 
+        # --- PHASE 2: Compute weather and time multipliers ---
+        # These scale every segment's λ before Dijkstra runs, so the safer route
+        # becomes more aggressive about avoiding risk in bad conditions.
         weather_data = data.get("weather")
         time_data = data.get("time_of_day")
         weather_mult, time_mult = _route_risk_multipliers(weather_data, time_data)
-        combined_mult = weather_mult * time_mult
+        combined_mult = weather_mult * time_mult  # e.g. rain + rush hour = 1.35 × 1.25 = 1.6875×
 
         origin_point = Point(o_lon, o_lat)
         dest_point = Point(d_lon, d_lat)
 
-        # Ensure λ map is ready
+        # Ensure λ map is ready (normally pre-computed at startup)
         global lambda_per_hour_latest
         if lambda_per_hour_latest is None:
             _compute_lambda_map_for_latest_window()
 
-        # Optionally adjust λ by current weather/time so safer route reflects conditions
+        # --- PHASE 2: Apply multipliers to all segment λ values ---
+        # Only creates a new dict if conditions differ from baseline (combined_mult != 1.0).
+        # The original lambda_per_hour_latest is never mutated.
         lam_for_routing = lambda_per_hour_latest
         if combined_mult != 1.0 and lambda_per_hour_latest:
             lam_for_routing = {
                 k: v * combined_mult for k, v in lambda_per_hour_latest.items()
             }
 
-        # Apply λ to edges as expected_crashes and risk-weight
+        # --- PHASE 3: Attach risk weights to every edge in the graph ---
+        # Sets expected_crashes and risk_weight_hours on each edge.
+        # risk_weight_hours = travel_time + β × expected_crashes
         apply_risk_to_edge_costs(road_graph, lam_for_routing, beta_hours_per_expected_crash=beta)  # type: ignore[arg-type]
 
-        # Snap origin/destination to nearest graph nodes
+        # --- PHASE 2: Snap user GPS points to nearest graph intersection nodes ---
+        # Fails if origin/destination are more than 300 m from any known intersection.
         try:
             start_node = snap_to_graph(origin_point, node_coords)  # type: ignore[arg-type]
             end_node = snap_to_graph(dest_point, node_coords)  # type: ignore[arg-type]
@@ -978,10 +1038,14 @@ def get_safety_aware_route():
                 400,
             )
 
-        # Find fastest and safer paths
+        # --- PHASE 3: Run Dijkstra twice ---
+        # fastest_path → minimises travel_time_hours (ignores risk)
+        # safer_path   → minimises risk_weight_hours (time + crash penalty)
         fastest_path = find_fastest_route(road_graph, start_node, end_node)  # type: ignore[arg-type]
         safer_path = find_safer_route(road_graph, start_node, end_node)  # type: ignore[arg-type]
 
+        # --- PHASE 4: Compute route-level risk scores ---
+        # Aggregates per-edge expected crashes into a Poisson route probability.
         fastest_summary = calculate_route_risk(road_graph, fastest_path)  # type: ignore[arg-type]
         safer_summary = calculate_route_risk(road_graph, safer_path)  # type: ignore[arg-type]
 

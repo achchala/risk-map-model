@@ -25,12 +25,17 @@ from shapely.geometry import LineString, MultiLineString, Point
 logger = logging.getLogger(__name__)
 
 
-# Default speeds (km/h) by road class, used when no explicit speed limits exist.
+# ---------------------------------------------------------------------------
+# PHASE 1 — TRAVEL TIME ESTIMATION
+# These are the assumed speeds for each road type in Toronto.
+# No live traffic data is used — these are fixed at startup.
+# They feed directly into the travel_time_hours edge attribute on every segment.
+# ---------------------------------------------------------------------------
 DEFAULT_SPEEDS_KMH: Dict[str, float] = {
-    "arterial": 50.0,
-    "collector": 40.0,
-    "local": 30.0,
-    "minor_arterial": 45.0,
+    "arterial": 50.0,       # Major roads like Yonge, Bloor
+    "collector": 40.0,      # Secondary roads feeding into arterials
+    "local": 30.0,          # Residential streets
+    "minor_arterial": 45.0, # Smaller arterials between major roads
 }
 
 
@@ -42,6 +47,12 @@ def estimate_travel_time_hours(
     """
     Estimate travel time (in hours) from length and road class.
 
+    PHASE 1 — TRAVEL TIME ESTIMATION
+    Called once per segment at graph-build time. The result is stored as the
+    'travel_time_hours' edge attribute and is used by Dijkstra for the fastest route.
+
+    Formula: travel_time_hours = segment_length_m / (speed_kmh / 3.6) / 3600
+
     Units:
     - segment_length_m: meters
     - speed: km/h
@@ -50,8 +61,9 @@ def estimate_travel_time_hours(
     if default_speeds_kmh is None:
         default_speeds_kmh = DEFAULT_SPEEDS_KMH
 
+    # Look up speed by road class; default to 40 km/h if not found
     speed_kmh = default_speeds_kmh.get(str(road_class).lower(), 40.0)
-    speed_ms = speed_kmh / 3.6
+    speed_ms = speed_kmh / 3.6  # convert km/h → m/s
     if speed_ms <= 0:
         # Fallback in pathological case
         speed_ms = 10.0
@@ -64,16 +76,18 @@ def build_road_graph(road_network: gpd.GeoDataFrame) -> nx.DiGraph:
     """
     Build a directed graph from the road network.
 
-    Nodes:
-        intersection IDs (FROM_INTERSECTION_ID / TO_INTERSECTION_ID)
+    PHASE 1 — GRAPH CONSTRUCTION
+    Called once at server startup. Converts the Toronto Centreline GeoDataFrame
+    into a networkx DiGraph where:
+      - Each node  = an intersection (FROM_INTERSECTION_ID / TO_INTERSECTION_ID)
+      - Each edge  = a road segment between those intersections (CENTRELINE_ID)
 
-    Edges:
-        attributes:
-        - segment_id (CENTRELINE_ID)
-        - geometry (LineString)
-        - length_m (segment_length)
-        - road_class (ROAD_CLASS)
-        - travel_time_hours
+    Edge attributes stored for use downstream:
+      - segment_id        → used to look up ML crash rates (λ) per segment
+      - geometry          → used to draw the route on the map
+      - length_m          → raw segment length in meters
+      - road_class        → determines assumed travel speed
+      - travel_time_hours → pre-computed cost for fastest-route Dijkstra
 
     One-way handling:
         - If ONEWAY_DIR_CODE indicates one-way, add edge in that direction only.
@@ -90,12 +104,14 @@ def build_road_graph(road_network: gpd.GeoDataFrame) -> nx.DiGraph:
             "to build a routing graph."
         )
 
+    # Each node in the graph is an intersection ID (a plain number from the Centreline data).
+    # Edges are the road segments connecting those intersections.
     G = nx.DiGraph()
 
     for _, seg in road_network.iterrows():
-        from_node = seg["FROM_INTERSECTION_ID"]
-        to_node = seg["TO_INTERSECTION_ID"]
-        segment_id = seg["CENTRELINE_ID"]
+        from_node = seg["FROM_INTERSECTION_ID"]   # intersection at the start of this segment
+        to_node = seg["TO_INTERSECTION_ID"]        # intersection at the end of this segment
+        segment_id = seg["CENTRELINE_ID"]          # stable ID used to look up ML crash rates later
         length_m = float(seg["segment_length"])
         road_class = seg.get("ROAD_CLASS", "unknown")
         geom = seg.geometry
@@ -104,6 +120,7 @@ def build_road_graph(road_network: gpd.GeoDataFrame) -> nx.DiGraph:
             geometry = geom
         elif isinstance(geom, MultiLineString) and len(geom.geoms) > 0:
             # Merge all parts into one LineString for routing
+            # (some segments in the Centreline data are stored as MultiLineStrings)
             coords = []
             for g in geom.geoms:
                 coords.extend(list(g.coords))
@@ -111,15 +128,16 @@ def build_road_graph(road_network: gpd.GeoDataFrame) -> nx.DiGraph:
                 continue
             geometry = LineString(coords)
         else:
-            continue
+            continue  # skip segments with no usable geometry
 
-        # Skip segments with invalid intersection IDs
+        # Skip segments with invalid intersection IDs (can't be added to the graph)
         try:
             if from_node is None or to_node is None or np.isnan(from_node) or np.isnan(to_node):
                 continue
         except (TypeError, ValueError):
             continue
 
+        # Pre-compute travel time so it's ready for Dijkstra at query time
         t_hours = estimate_travel_time_hours(length_m, str(road_class))
 
         G.add_edge(
@@ -129,11 +147,11 @@ def build_road_graph(road_network: gpd.GeoDataFrame) -> nx.DiGraph:
             geometry=geometry,
             length_m=length_m,
             road_class=road_class,
-            travel_time_hours=t_hours,
+            travel_time_hours=t_hours,  # cost for fastest-route Dijkstra
         )
 
-        # Handle one-way vs two-way. If there's no clear one-way code,
-        # default to bidirectional.
+        # One-way streets only get a single directed edge (from → to).
+        # Bidirectional streets get a second reverse edge with the same attributes.
         oneway_code = str(seg.get("ONEWAY_DIR_CODE", "")).upper()
         is_one_way = oneway_code in {"NB", "SB", "EB", "WB", "ONE_WAY"}
 
@@ -165,17 +183,31 @@ def apply_risk_to_edge_costs(
     """
     Annotate edges with expected crashes and combined cost.
 
+    PHASE 3 — RISK WEIGHTING
+    Called on every route request (after multipliers are applied) to attach a
+    risk-adjusted cost to every edge. The safer-route Dijkstra minimises
+    'risk_weight_hours' instead of raw travel time.
+
+    How the penalty works:
+        expected_crashes  = λ × travel_time_hours
+            → "how many crashes would we expect on this segment during this trip?"
+
+        risk_weight_hours = travel_time_hours + β × expected_crashes
+            → makes risky segments appear "slower" so Dijkstra avoids them
+
+    β (beta) defaults to 0.1 h/expected crash — tunable per request.
+    A higher β makes the safer route avoid risk more aggressively, even at the
+    cost of more travel time.
+
     Parameters:
         G: graph with 'segment_id' and 'travel_time_hours' on each edge
         lambda_per_hour: mapping from segment_id to crash rate λ (crashes/hour)
-        beta_hours_per_expected_crash: coefficient converting expected crashes
-            into time-equivalent hours in the combined weight:
-
-            edge_cost_hours = travel_time_hours + beta * expected_crashes
+                         (already multiplied by weather/time factors before this call)
+        beta_hours_per_expected_crash: how much time-penalty to assign per expected crash
 
     Edge attributes added:
-        - expected_crashes
-        - risk_weight_hours
+        - expected_crashes  → used in the route risk summary returned to the app
+        - risk_weight_hours → used as the Dijkstra weight for the safer route
     """
     def _get_lam(seg_id, lam_dict):
         """Look up lambda with type normalization (int/np.int64/float key mismatch)."""
@@ -190,15 +222,16 @@ def apply_risk_to_edge_costs(
                 return float(v)
         except (ValueError, TypeError):
             pass
-        return 0.0
+        return 0.0  # segment not in λ map → treat as zero risk
 
     for u, v, data in G.edges(data=True):
         seg_id = data.get("segment_id")
         travel_time = float(data.get("travel_time_hours", 0.0))
         lam = _get_lam(seg_id, lambda_per_hour)
 
-        expected_crashes = lam * travel_time  # dimensionless expected count
+        expected_crashes = lam * travel_time  # expected crash count on this edge during this trip
         data["expected_crashes"] = expected_crashes
+        # risk_weight_hours is what the safer-route Dijkstra minimises
         data["risk_weight_hours"] = travel_time + beta_hours_per_expected_crash * expected_crashes
 
 
@@ -209,6 +242,11 @@ def find_fastest_route(
 ) -> List[Hashable]:
     """
     Find the fastest route (time-only) using Dijkstra on travel_time_hours.
+
+    PHASE 3 — DIJKSTRA (FASTEST)
+    Ignores crash risk entirely. Only cares about how long each segment takes
+    to drive based on road class speed assumptions. This is the "ignore safety"
+    baseline shown to the user alongside the safer route.
     """
     path = nx.dijkstra_path(G, source=start_node, target=end_node, weight="travel_time_hours")
     return path
@@ -222,8 +260,13 @@ def find_safer_route(
     """
     Find a safer route using Dijkstra on combined time + risk weight.
 
-    Assumes `apply_risk_to_edge_costs` has been called so that each edge
-    has a 'risk_weight_hours' attribute.
+    PHASE 3 — DIJKSTRA (SAFER)
+    Uses risk_weight_hours = travel_time + β × expected_crashes as the edge cost.
+    Segments with higher crash rates appear "slower", so Dijkstra naturally routes
+    around them — even if the physical travel time is similar.
+
+    Assumes apply_risk_to_edge_costs() has been called first so that each edge
+    already has a 'risk_weight_hours' attribute.
     """
     path = nx.dijkstra_path(G, source=start_node, target=end_node, weight="risk_weight_hours")
     return path
@@ -248,8 +291,19 @@ def calculate_route_risk(
     """
     Aggregate expected crashes and route crash probability for a path.
 
+    PHASE 4 — ROUTE RISK SCORE
+    After Dijkstra picks a path, this function rolls up all the per-edge
+    expected crash counts into a single route-level risk score.
+
+    Poisson model:
+        Λ = Σ(λ_i × t_i)          total expected crashes across all edges
+        P = 1 − e^{−Λ}            probability of at least one crash on this route
+
+    This is the standard Poisson "at least one event" formula. It works because
+    crashes on individual segments are assumed to be rare, independent events.
+
     Assumes edges along the path already have 'expected_crashes' and
-    'travel_time_hours' set.
+    'travel_time_hours' set (i.e., apply_risk_to_edge_costs was called first).
 
     Returns:
         {
@@ -267,6 +321,7 @@ def calculate_route_risk(
         total_time += t
         total_expected += ec
 
+    # Poisson CDF: probability of at least one crash on the full route
     route_probability = 1.0 - float(np.exp(-total_expected))
     return {
         "expected_crashes": total_expected,
@@ -279,10 +334,20 @@ def build_node_geometry(road_network: gpd.GeoDataFrame) -> Dict[Hashable, Point]
     """
     Derive approximate node coordinates for each intersection ID from segment endpoints.
 
+    PHASE 1 — NODE GEOMETRY
+    Graph nodes are just numeric IDs — they have no coordinates attached.
+    This function creates a separate lookup dict (node_id → lat/lon Point) by
+    reading the first/last coordinate of each segment's geometry.
+
+    Why it's needed:
+        When the user taps a destination on the map, the app sends a lat/lon.
+        We need to convert that into a node ID the graph understands.
+        snap_to_graph() uses this dict to find the nearest node.
+
     Returns:
-        dict: intersection_id -> Point (in EPSG:4326)
+        dict: intersection_id -> Point (in EPSG:4326, i.e. standard lat/lon)
     """
-    # Work in geographic CRS so distances can be approximated later
+    # Re-project to lat/lon so snap_to_graph can compare against user GPS coordinates
     roads_geo = road_network.to_crs("EPSG:4326")
 
     node_coords: Dict[Hashable, Point] = {}
@@ -290,8 +355,8 @@ def build_node_geometry(road_network: gpd.GeoDataFrame) -> Dict[Hashable, Point]
     for _, seg in roads_geo.iterrows():
         geom = seg.geometry
         if isinstance(geom, LineString):
-            start_pt = Point(geom.coords[0])
-            end_pt = Point(geom.coords[-1])
+            start_pt = Point(geom.coords[0])  # first vertex = FROM intersection location
+            end_pt = Point(geom.coords[-1])    # last vertex  = TO intersection location
         elif isinstance(geom, MultiLineString) and len(geom.geoms) > 0:
             first_line = geom.geoms[0]
             last_line = geom.geoms[-1]
@@ -309,6 +374,7 @@ def build_node_geometry(road_network: gpd.GeoDataFrame) -> Dict[Hashable, Point]
             continue
 
         # First segment to define a node wins; they should be very close anyway.
+        # An intersection is shared by multiple segments — all converge at the same point.
         if from_node not in node_coords:
             node_coords[from_node] = start_pt
         if to_node not in node_coords:
@@ -326,8 +392,18 @@ def snap_to_graph(
     """
     Snap a user location to the nearest graph node within a maximum distance.
 
-    Distances are approximated by converting degrees to meters (~111km per degree),
-    which is sufficient at city scale for snap-to-graph.
+    PHASE 2 — SNAP TO GRAPH
+    The user's origin and destination arrive as GPS coordinates (lat/lon).
+    The graph only understands intersection IDs (node numbers).
+    This function bridges that gap by finding the nearest intersection node
+    to the user's point.
+
+    If nothing is within 300 m, the request is rejected — this prevents routing
+    to/from locations outside the Toronto road network coverage area.
+
+    Distance approximation:
+        Uses degrees × 111,000 to convert to meters (flat-earth approximation).
+        Accurate enough for city-scale snap — error is <1% within Toronto.
     """
     if not node_coords:
         raise ValueError("No node coordinates available to snap to.")
@@ -336,7 +412,7 @@ def snap_to_graph(
     min_dist_m = float("inf")
 
     for node_id, node_point in node_coords.items():
-        # Approximate meters using a simple WGS84 scale
+        # Convert degree distance to approximate meters (1° ≈ 111 km at Toronto's latitude)
         dist_deg = user_point.distance(node_point)
         dist_m = dist_deg * 111_000.0
         if dist_m < max_distance_m and dist_m < min_dist_m:
