@@ -221,12 +221,21 @@ struct RiskDetailView: View {
         return "\(Int(meters))m (long)"
     }
 
-    /// Exclude drivers that reflect panel construction time/weather, not meaningful road factors.
+    /// Exclude drivers that reflect panel construction time/weather, not fixed road properties.
     private func filteredRiskDrivers(_ drivers: [String: Double]) -> [String: Double] {
         let excludeKeys: Set<String> = [
-            "datetime_hour", "day_of_week", "is_weekend", "month",
-            "temperature", "precipitation", "snow_depth_mm", "wind_speed",
-            "is_freezing", "is_precip"
+            // Time of day
+            "datetime_hour", "hour_of_day", "hour_sin", "hour_cos",
+            // Day of week
+            "day_of_week", "is_weekend", "dow_sin", "dow_cos",
+            // Month / season
+            "month", "month_sin", "month_cos", "season_int",
+            // Weather (conditions when panel was built)
+            "temperature", "precipitation", "snow_depth_mm", "snow_mm",
+            "wind_speed", "is_freezing", "is_precip", "visibility",
+            "weather_condition", "is_missing_weather",
+            // Context tied to time
+            "is_school_active_hour",
         ]
         return drivers.filter { !excludeKeys.contains($0.key) }
     }
