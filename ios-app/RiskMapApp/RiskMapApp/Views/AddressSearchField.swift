@@ -17,6 +17,7 @@ struct AddressSearchField: View {
 
     @StateObject private var completer = LocalSearchCompleter()
     @FocusState private var isFocused: Bool
+    @State private var skipNextSearch = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -29,6 +30,10 @@ struct AddressSearchField: View {
                     .textFieldStyle(.plain)
                     .focused($isFocused)
                     .onChange(of: text) { _, newValue in
+                        if skipNextSearch {
+                            skipNextSearch = false
+                            return
+                        }
                         completer.search(query: newValue)
                     }
                     .autocorrectionDisabled()
@@ -93,6 +98,7 @@ struct AddressSearchField: View {
             let title = item.name ?? suggestion.title
 
             DispatchQueue.main.async {
+                skipNextSearch = true
                 text = title
                 onCoordinateSelected(coord)
             }

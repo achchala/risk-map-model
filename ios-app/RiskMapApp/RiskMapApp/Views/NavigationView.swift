@@ -137,20 +137,14 @@ struct RouteNavigationView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if routeService.optimalRoute != nil {
                     HStack(spacing: 8) {
-                        Rectangle().fill(Color.brandTertiary).frame(width: 20, height: 4)
+                        Rectangle().fill(Color.routeFastestYellow).frame(width: 20, height: 4)
                         Text("Fastest Route").font(.caption)
                     }
                 }
                 if routeService.saferRoute != nil {
                     HStack(spacing: 8) {
-                        Rectangle().fill(Color.brandPrimary).frame(width: 20, height: 4)
+                        Rectangle().fill(Color.routeSafestBlue).frame(width: 20, height: 4)
                         Text("Safest Route").font(.caption)
-                    }
-                }
-                if selectedRoute != nil {
-                    HStack(spacing: 8) {
-                        Rectangle().fill(Color.brandSecondary).frame(width: 20, height: 4)
-                        Text("Selected").font(.caption)
                     }
                 }
             }
@@ -212,36 +206,41 @@ struct RouteNavigationView: View {
                 .stroke(.gray.opacity(0.5), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [5, 5]))
         }
 
-        if let optimalRoute = routeService.optimalRoute {
-            let coords = optimalRoute.detailedCoordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite }
-            if !coords.isEmpty {
-                let isSelected = selectedRoute?.id == optimalRoute.id
-                MapPolyline(coordinates: coords)
-                    .stroke(.white, style: StrokeStyle(lineWidth: isSelected ? 14 : 12, lineCap: .round, lineJoin: .round))
-                MapPolyline(coordinates: coords)
-                    .stroke(isSelected ? Color.brandSecondary : Color.brandTertiary, style: StrokeStyle(lineWidth: isSelected ? 10 : 8, lineCap: .round, lineJoin: .round))
-            }
+        // Draw order: non-selected routes first (bottom), then selected route (on top), then dashed green overlay
+        let optimalCoords = routeService.optimalRoute?.detailedCoordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite } ?? []
+        let saferCoords = routeService.saferRoute?.detailedCoordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite } ?? []
+        let routesAreSame = !optimalCoords.isEmpty && !saferCoords.isEmpty && areRoutesSimilar(optimalCoords, saferCoords)
+        let optimalSelected = selectedRoute?.id == routeService.optimalRoute?.id
+        let saferSelected = selectedRoute?.id == routeService.saferRoute?.id
+
+        // 1. Non-selected route(s) drawn first (underneath) — faded colors
+        if let optimalRoute = routeService.optimalRoute, !optimalCoords.isEmpty, !optimalSelected {
+            MapPolyline(coordinates: optimalCoords)
+                .stroke(.white, style: StrokeStyle(lineWidth: 12, lineCap: .round, lineJoin: .round))
+            MapPolyline(coordinates: optimalCoords)
+                .stroke(Color.routeFastestYellowFaded, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
+        }
+        if let saferRoute = routeService.saferRoute, !saferCoords.isEmpty, !saferSelected {
+            MapPolyline(coordinates: saferCoords)
+                .stroke(.white, style: StrokeStyle(lineWidth: routesAreSame ? 12 : 14, lineCap: .round, lineJoin: .round))
+            MapPolyline(coordinates: saferCoords)
+                .stroke(Color.routeSafestBlueFaded, style: StrokeStyle(lineWidth: routesAreSame ? 8 : 10, lineCap: .round, lineJoin: .round, dash: routesAreSame ? [15, 8] : []))
         }
 
-        if let saferRoute = routeService.saferRoute {
-            let coords = saferRoute.detailedCoordinates.filter { $0.latitude.isFinite && $0.longitude.isFinite }
-            if !coords.isEmpty {
-                let optimalCoords = routeService.optimalRoute?.detailedCoordinates ?? []
-                let isDifferent = optimalCoords.count != coords.count || !areRoutesSimilar(optimalCoords, coords)
-                let isSelected = selectedRoute?.id == saferRoute.id
-                if isDifferent {
-                    MapPolyline(coordinates: coords)
-                        .stroke(.white, style: StrokeStyle(lineWidth: isSelected ? 16 : 14, lineCap: .round, lineJoin: .round))
-                    MapPolyline(coordinates: coords)
-                        .stroke(isSelected ? Color.brandSecondary : Color.brandPrimary, style: StrokeStyle(lineWidth: isSelected ? 12 : 10, lineCap: .round, lineJoin: .round))
-                } else {
-                    MapPolyline(coordinates: coords)
-                        .stroke(.white, style: StrokeStyle(lineWidth: isSelected ? 14 : 12, lineCap: .round, lineJoin: .round))
-                    MapPolyline(coordinates: coords)
-                        .stroke(isSelected ? Color.brandSecondary : Color.brandPrimary.opacity(0.8), style: StrokeStyle(lineWidth: isSelected ? 10 : 8, lineCap: .round, lineJoin: .round, dash: [15, 8]))
-                }
-            }
+        // 2. Selected route drawn second (on top of non-selected) — full colors
+        if let optimalRoute = routeService.optimalRoute, !optimalCoords.isEmpty, optimalSelected {
+            MapPolyline(coordinates: optimalCoords)
+                .stroke(.white, style: StrokeStyle(lineWidth: 14, lineCap: .round, lineJoin: .round))
+            MapPolyline(coordinates: optimalCoords)
+                .stroke(Color.routeFastestYellow, style: StrokeStyle(lineWidth: 10, lineCap: .round, lineJoin: .round))
         }
+        if let saferRoute = routeService.saferRoute, !saferCoords.isEmpty, saferSelected {
+            MapPolyline(coordinates: saferCoords)
+                .stroke(.white, style: StrokeStyle(lineWidth: routesAreSame ? 14 : 16, lineCap: .round, lineJoin: .round))
+            MapPolyline(coordinates: saferCoords)
+                .stroke(Color.routeSafestBlue, style: StrokeStyle(lineWidth: routesAreSame ? 10 : 12, lineCap: .round, lineJoin: .round, dash: routesAreSame ? [15, 8] : []))
+        }
+
     }
 
     private func areRoutesSimilar(_ coords1: [CLLocationCoordinate2D], _ coords2: [CLLocationCoordinate2D]) -> Bool {
@@ -294,13 +293,13 @@ struct RouteNavigationView: View {
                         ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
                         Text("Calculating...")
                     } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                        Text("Find Safest Route")
+                        Image(systemName: "arrow.triangle.turn.up.right.diamond.fill")
+                        Text("Find Route")
                     }
                 }
                 .frame(maxWidth: .infinity)
                 .padding()
-                .background((startCoordinate != nil && destinationCoordinate != nil) ? Color.brandPrimary : Color.gray)
+                .background((startCoordinate != nil && destinationCoordinate != nil) ? Color.brandPrimary : Color.brandPrimary.opacity(0.45))
                 .foregroundColor(.white)
                 .cornerRadius(10)
             }
@@ -497,7 +496,7 @@ struct RouteComparisonCard: View {
                             route: saferRoute,
                             title: "Safest Route",
                             subtitle: routesAreSame ? "Same as fastest route" : saferRoute.safetyExplanation(comparedTo: optimalRoute),
-                            color: .brandPrimary,
+                            color: .routeSafestBlue,
                             isSelected: selectedRoute?.id == saferRoute.id
                         ) { selectedRoute = saferRoute }
 
@@ -505,7 +504,7 @@ struct RouteComparisonCard: View {
                             route: optimalRoute,
                             title: "Fastest Route",
                             subtitle: routesAreSame ? "Same as safest route" : "Shortest travel time",
-                            color: .brandTertiary,
+                            color: .routeFastestYellow,
                             isSelected: selectedRoute?.id == optimalRoute.id
                         ) { selectedRoute = optimalRoute }
 
@@ -538,22 +537,37 @@ struct RouteComparisonCard: View {
 
                         HStack(spacing: 12) {
                             Button(action: { onExportToAppleMaps(selectedRoute ?? saferRoute) }) {
-                                Label("Apple Maps", systemImage: "map.fill")
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .background(Color.brandTertiary)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
+                                VStack(spacing: 6) {
+                                    Image("applemapslogo")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(height: 28)
+                                    Text("Apple Maps")
+                                        .font(.subheadline)
+                                        .foregroundColor(.white)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(Color.brandTertiary)
+                                .cornerRadius(10)
                             }
                             Button(action: { onExportToGoogleMaps(selectedRoute ?? saferRoute) }) {
-                                Label("Google Maps", systemImage: "globe")
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .background(Color.brandPrimary)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
+                                VStack(spacing: 6) {
+                                    Image("googlemapslogo")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(height: 28)
+                                    Text("Google Maps")
+                                        .font(.subheadline)
+                                        .foregroundColor(.white)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(Color.brandPrimary)
+                                .cornerRadius(10)
                             }
                         }
+                        .padding(.horizontal, 16)
                     }
                     .padding(.bottom, 16)
                 }

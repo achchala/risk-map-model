@@ -26,11 +26,10 @@ struct LandingView: View {
                 Spacer()
 
                 VStack(spacing: 0) {
-                Image("StreetSmartLogo")
+                Image("streetsmart_white")
                     .resizable()
                     .scaledToFit()
                     .frame(width: 220, height: 220)
-                    .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                     .padding(.bottom, 24)
 
                 Text("StreetSmart")

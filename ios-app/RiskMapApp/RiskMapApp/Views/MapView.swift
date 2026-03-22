@@ -285,6 +285,14 @@ extension Color {
     static let brandPrimary = Color(hex: "2F3B69")
     static let brandSecondary = Color(hex: "00BF63")
     static let brandTertiary = Color(hex: "009FC1")
+    /// Calming blue for safest route
+    static let routeSafestBlue = Color(hex: "5B8FDB")
+    /// Faded blue for unselected safest route
+    static let routeSafestBlueFaded = Color(hex: "5B8FDB").opacity(0.45)
+    /// Yellow for fastest route
+    static let routeFastestYellow = Color(hex: "E6A800")
+    /// Faded yellow for unselected fastest route
+    static let routeFastestYellowFaded = Color(hex: "E6A800").opacity(0.45)
     static let brandPrimarySoft = Color.brandPrimary.opacity(0.14)
     static let brandSecondarySoft = Color.brandSecondary.opacity(0.14)
     static let brandTertiarySoft = Color.brandTertiary.opacity(0.14)
