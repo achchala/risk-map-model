@@ -16,14 +16,27 @@ class RiskService: ObservableObject {
     /// Feature importance from model (for ranking risk drivers). Fetched with risk-definition.
     @Published var featureImportance: [String: Double]? = nil
     
-    // Backend API URL: Simulator uses localhost; device must use your Mac's IP on the same Wi‑Fi.
-    #if targetEnvironment(simulator)
-    private let baseURL = "http://localhost:8000/api"
-    #else
-    // Your Mac's IP for device testing (same Wi‑Fi as iPhone)
-    private let baseURL = "http://10.36.143.251:8000/api"
-    #endif
+    // Backend API URL. Use Settings to set your Mac's IP when testing on a physical device (same Wi‑Fi).
+    private var baseURL: String {
+        if let custom = UserDefaults.standard.string(forKey: "backendAPIURL"), !custom.trimmingCharacters(in: .whitespaces).isEmpty {
+            var trimmed = custom.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasSuffix("/") { trimmed = String(trimmed.dropLast()) }
+            return trimmed.hasSuffix("/api") ? trimmed : "\(trimmed)/api"
+        }
+        #if targetEnvironment(simulator)
+        return "http://localhost:8000/api"
+        #else
+        return "http://10.36.169.232:8000/api"  // fallback; set in Settings for your Mac's IP
+        #endif
+    }
     
+    /// Add ngrok bypass header when using ngrok tunnel (skips browser interstitial)
+    private func addNgrokBypass(to request: inout URLRequest) {
+        if baseURL.contains("ngrok") {
+            request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+        }
+    }
+
     /// Parse backend JSON error body: { "error": "message" }
     private static func parseServerError(from data: Data) -> String? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -50,6 +63,7 @@ class RiskService: ObservableObject {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.timeoutInterval = 30.0  // 30 second timeout
+            addNgrokBypass(to: &request)
             
             var requestBody: [String: Any] = [
                 "north": region.center.latitude + region.span.latitudeDelta / 2,
@@ -147,6 +161,7 @@ class RiskService: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        addNgrokBypass(to: &request)
         
         let requestBody: [String: Any] = [
             "latitude": location.latitude,
@@ -171,6 +186,29 @@ class RiskService: ObservableObject {
             .sorted { $0.numTotalCrashes > $1.numTotalCrashes }
     }
 
+    /// Test backend connectivity (for Settings). Returns (success, message).
+    func testConnection() async -> (Bool, String) {
+        let urlString = "\(baseURL)/health"
+        guard let url = URL(string: urlString) else {
+            return (false, "Invalid URL: \(urlString)")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10.0
+        addNgrokBypass(to: &request)
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return (false, "Invalid response")
+            }
+            if http.statusCode == 200 {
+                return (true, "Connected successfully")
+            }
+            return (false, "HTTP \(http.statusCode) at \(urlString)")
+        } catch {
+            return (false, "\(error.localizedDescription)\nURL: \(urlString)")
+        }
+    }
+
     /// Fetch risk definition (percentile thresholds) from backend
     func fetchRiskDefinition() async throws -> RiskDefinitionResponse {
         let urlString = "\(baseURL)/risk-definition"
@@ -179,6 +217,7 @@ class RiskService: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 15.0
+        addNgrokBypass(to: &request)
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -227,6 +266,7 @@ class RiskService: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 25.0
+        addNgrokBypass(to: &request)
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -251,6 +291,7 @@ class RiskService: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 20.0
+        addNgrokBypass(to: &request)
         request.httpBody = try JSONSerialization.data(withJSONObject: ["urls": namedURLs])
 
         let (data, response) = try await URLSession.shared.data(for: request)

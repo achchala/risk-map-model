@@ -78,17 +78,57 @@ enum SafetySpeedBalance: String, CaseIterable {
 }
 
 struct SettingsView: View {
+    @EnvironmentObject var riskService: RiskService
     @AppStorage("notificationsEnabled") private var notificationsEnabled = false
     @AppStorage("autoRefresh") private var autoRefresh = true
     @AppStorage("safetySpeedBalanceSlider") private var safetySpeedSlider = 0.5
+    @AppStorage("backendAPIURL") private var backendAPIURL = ""
+    @State private var connectionTestMessage: String?
+    @State private var isTestingConnection = false
 
     private var currentBalance: SafetySpeedBalance {
         SafetySpeedBalance(sliderValue: safetySpeedSlider)
     }
 
+    private func runConnectionTest() async {
+        connectionTestMessage = nil
+        isTestingConnection = true
+        let (ok, msg) = await riskService.testConnection()
+        await MainActor.run {
+            isTestingConnection = false
+            connectionTestMessage = msg
+        }
+    }
+
     var body: some View {
         NavigationView {
             Form {
+                Section(header: Text("Backend API"), footer: Text("When testing on a physical device, enter your Mac's IP (e.g. http://192.168.1.100:8000) or ngrok URL (e.g. https://xxxx.ngrok-free.app). For ngrok, use the exact URL from the ngrok terminal. Mac and iPhone must be on same Wi‑Fi unless using ngrok.")) {
+                    TextField("e.g. http://192.168.1.100:8000", text: $backendAPIURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    Button(action: {
+                        Task { await runConnectionTest() }
+                    }) {
+                        HStack {
+                            if isTestingConnection {
+                                ProgressView()
+                                Text("Testing...")
+                            } else {
+                                Text("Test Connection")
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .disabled(isTestingConnection || backendAPIURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                    if let msg = connectionTestMessage {
+                        Text(msg)
+                            .font(.caption)
+                            .foregroundColor(msg.contains("success") ? .green : .red)
+                    }
+                }
+
                 Section(header: Text("Route Planning"), footer: Text("Controls how the \"safer\" route balances risk avoidance with travel time. Slide left for faster routes; slide right to avoid high-risk roads.")) {
                     HStack {
                         Text("Speed")
