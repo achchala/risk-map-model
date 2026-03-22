@@ -9,30 +9,40 @@ import SwiftUI
 
 struct RiskListView: View {
     @EnvironmentObject var riskService: RiskService
+    @State private var searchText = ""
     
     var highRiskRoads: [RoadSegment] {
         riskService.getHighRiskRoads()
     }
     
+    var filteredRoads: [RoadSegment] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return highRiskRoads }
+        return highRiskRoads.filter { segment in
+            segment.linearName.lowercased().contains(query)
+                || (segment.segmentLocation?.lowercased().contains(query) ?? false)
+        }
+    }
+    
     var body: some View {
         NavigationView {
             List {
-                if highRiskRoads.isEmpty {
+                if filteredRoads.isEmpty {
                     VStack(spacing: 16) {
-                        Image(systemName: "map")
+                        Image(systemName: searchText.isEmpty ? "map" : "magnifyingglass")
                             .font(.system(size: 50))
                             .foregroundColor(.secondary)
-                        Text("No high-risk roads found")
+                        Text(searchText.isEmpty ? "No high-risk roads found" : "No matches for \"\(searchText)\"")
                             .font(.headline)
                             .foregroundColor(.secondary)
-                        Text("Load the map to see risk predictions")
+                        Text(searchText.isEmpty ? "Load the map to see risk predictions" : "Try a different search term")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
                     .frame(maxWidth: .infinity)
                     .padding()
                 } else {
-                    ForEach(highRiskRoads) { segment in
+                    ForEach(filteredRoads) { segment in
                         NavigationLink(destination: RiskDetailView(segment: segment)) {
                             RiskListRow(segment: segment)
                         }
@@ -40,6 +50,7 @@ struct RiskListView: View {
                 }
             }
             .navigationTitle("High Risk Roads")
+            .searchable(text: $searchText, prompt: "Search road names")
             .refreshable {
                 // refresh data if needed
             }
@@ -69,17 +80,11 @@ struct RiskListRow: View {
             }
             
             Spacer()
-            
-            VStack(alignment: .trailing) {
-                Text(segment.riskLevel.displayName)
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundColor(Color(hex: segment.riskLevel.color))
-                
-                Text("\(Int(segment.confidence * 100))%")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
+
+            Text(segment.riskLevel.displayName)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundColor(Color(hex: segment.riskLevel.color))
         }
         .padding(.vertical, 4)
     }

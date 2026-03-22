@@ -250,7 +250,7 @@ class RiskService: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 90.0
+        request.timeoutInterval = 20.0
         request.httpBody = try JSONSerialization.data(withJSONObject: ["urls": namedURLs])
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -265,7 +265,7 @@ class RiskService: ObservableObject {
         }
 
         let decoded = try JSONDecoder().decode(GoogleMapsETAResponse.self, from: data)
-        print("[google-eta] backend response etasSeconds=\(decoded.etasSeconds) failures=\(decoded.failures)")
+        print("[google-eta] backend response etasSeconds=\(decoded.etasSeconds) failures=\(decoded.failures) sources=\(decoded.sources ?? [:])")
         return decoded
     }
 }

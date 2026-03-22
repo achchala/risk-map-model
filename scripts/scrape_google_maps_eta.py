@@ -7,7 +7,7 @@ Usage:
 
 Optional:
   python scripts/scrape_google_maps_eta.py "<url>" --headed
-  python scripts/scrape_google_maps_eta.py "<url>" --timeout 45
+  python scripts/scrape_google_maps_eta.py "<url>" --timeout 20
 
 Notes:
 - This is for debugging/prototyping only.
@@ -37,8 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=35,
-        help="Navigation/render timeout in seconds (default: 35)",
+        default=20,
+        help="Navigation/render timeout in seconds (default: 20)",
     )
     return parser.parse_args()
 
@@ -168,7 +168,7 @@ def main() -> int:
             return 1
 
         candidates = []
-        deadline = time.monotonic() + min(float(args.timeout), 8.0)
+        deadline = time.monotonic() + min(float(args.timeout), 6.0)
         while time.monotonic() < deadline:
             candidates = scrape_candidates(page)
             if candidates:

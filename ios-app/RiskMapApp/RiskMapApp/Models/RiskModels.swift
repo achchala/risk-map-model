@@ -186,6 +186,7 @@ struct SafetyAwareResponse: Codable {
 struct GoogleMapsETAResponse: Codable {
     let etasSeconds: [String: Double]
     let failures: [String: String]
+    let sources: [String: String]?
 }
 
 struct RiskDefinitionResponse: Codable {
@@ -343,17 +344,11 @@ struct Route: Identifiable {
         var reasons: [String] = []
         if let optimal = optimalRoute {
             let highRiskDiff = optimal.highRiskSegments - self.highRiskSegments
-            let riskScoreDiff = optimal.riskScore - self.riskScore
             if highRiskDiff > 0 {
                 reasons.append("Avoids \(highRiskDiff) additional high-risk segment\(highRiskDiff > 1 ? "s" : "")")
             }
             if self.highRiskSegments == 0 {
                 reasons.append("Completely avoids high-risk roads")
-            } else if self.highRiskSegments < optimal.highRiskSegments {
-                reasons.append("Reduces high-risk exposure by \(highRiskDiff) segment\(highRiskDiff > 1 ? "s" : "")")
-            }
-            if riskScoreDiff > 0.3 {
-                reasons.append("Lower overall risk score (\(String(format: "%.1f", self.riskScore)) vs \(String(format: "%.1f", optimal.riskScore)))")
             }
             if self.lowRiskSegments > optimal.lowRiskSegments {
                 let diff = self.lowRiskSegments - optimal.lowRiskSegments
@@ -414,13 +409,9 @@ struct RouteComparison {
 
     var safetyImprovement: String {
         let highRiskDiff = optimalRoute.highRiskSegments - saferRoute.highRiskSegments
-        let riskScoreDiff = optimalRoute.riskScore - saferRoute.riskScore
         var improvements: [String] = []
         if highRiskDiff > 0 {
             improvements.append("\(highRiskDiff) fewer high-risk segment\(highRiskDiff > 1 ? "s" : "")")
-        }
-        if riskScoreDiff > 0.3 {
-            improvements.append("\(String(format: "%.1f", riskScoreDiff)) points lower risk score")
         }
         if saferRoute.lowRiskSegments > optimalRoute.lowRiskSegments {
             let diff = saferRoute.lowRiskSegments - optimalRoute.lowRiskSegments
@@ -431,16 +422,12 @@ struct RouteComparison {
 
     var detailedExplanation: String {
         let highRiskDiff = optimalRoute.highRiskSegments - saferRoute.highRiskSegments
-        let riskScoreDiff = optimalRoute.riskScore - saferRoute.riskScore
         var reasons: [String] = []
         if highRiskDiff > 0 {
             reasons.append("avoids \(highRiskDiff) high-risk road segment\(highRiskDiff > 1 ? "s" : "") that the fastest route would take")
         }
         if saferRoute.highRiskSegments == 0 && optimalRoute.highRiskSegments > 0 {
             reasons.append("completely eliminates high-risk road exposure")
-        }
-        if riskScoreDiff > 0.5 {
-            reasons.append("has a significantly lower overall risk score (\(String(format: "%.1f", saferRoute.riskScore)) vs \(String(format: "%.1f", optimalRoute.riskScore)))")
         }
         if saferRoute.lowRiskSegments > optimalRoute.lowRiskSegments + 2 {
             let diff = saferRoute.lowRiskSegments - optimalRoute.lowRiskSegments

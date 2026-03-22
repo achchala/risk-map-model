@@ -45,7 +45,7 @@ struct AddressSearchField: View {
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: "mappin.circle")
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(.brandTertiary)
                                     .font(.body)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(suggestion.title)
@@ -71,6 +71,10 @@ struct AddressSearchField: View {
                     }
                 }
                 .background(Color(UIColor.secondarySystemBackground))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.brandTertiary.opacity(0.18), lineWidth: 1)
+                )
                 .cornerRadius(8)
                 .padding(.horizontal, 4)
                 .padding(.top, 4)
