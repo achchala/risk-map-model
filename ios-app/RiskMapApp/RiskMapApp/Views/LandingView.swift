@@ -14,8 +14,8 @@ struct LandingView: View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color(red: 0.11, green: 0.36, blue: 0.42),
-                    Color(red: 0.06, green: 0.22, blue: 0.28)
+                    Color.brandPrimary,
+                    Color.brandPrimary.opacity(0.75)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -31,7 +31,6 @@ struct LandingView: View {
                     .scaledToFit()
                     .frame(width: 220, height: 220)
                     .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                    .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 10)
                     .padding(.bottom, 24)
 
                 Text("StreetSmart")
@@ -54,13 +53,12 @@ struct LandingView: View {
                     .padding(.bottom, 48)
 
                 Button(action: onContinue) {
-                    Text("Get Started")
-                        .font(.headline)
-                        .foregroundColor(Color(red: 0.11, green: 0.36, blue: 0.42))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(Color.white)
-                        .cornerRadius(14)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 56, height: 56)
+                        .background(Color.white.opacity(0.2))
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 32)

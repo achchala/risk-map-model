@@ -595,6 +595,20 @@ def _safe_str_val(val, default=""):
     return s if s else default
 
 
+def _get_full_street_name(row_or_seg) -> str:
+    """Return full street name (e.g. 'King Street W') from LINEAR_NAME_FULL or built from components."""
+    if row_or_seg is None:
+        return "Unknown"
+    full = _safe_str_val(row_or_seg.get("LINEAR_NAME_FULL"), "")
+    if full:
+        return full
+    name = _safe_str_val(row_or_seg.get("LINEAR_NAME"), "")
+    stype = _safe_str_val(row_or_seg.get("LINEAR_NAME_TYPE"), "")
+    direction = _safe_str_val(row_or_seg.get("LINEAR_NAME_DIR"), "")
+    parts = [p for p in [name, stype, direction] if p]
+    return " ".join(parts) if parts else "Unknown"
+
+
 def _get_segment_location_description(row) -> str:
     """Build 'from X to Y' description using cross-street names or coordinates."""
     if row is None:
@@ -745,7 +759,7 @@ def get_risk_predictions():
             segment_location = _get_segment_location_description(segment)
             result = {
                 "id": str(seg_id),
-                "LINEAR_NAME": segment.get("LINEAR_NAME", "Unknown"),
+                "LINEAR_NAME": _get_full_street_name(segment),
                 "ROAD_CLASS": segment.get("ROAD_CLASS", "Unknown"),
                 "segment_length": float(segment.get("segment_length", 0)),
                 "segment_location": segment_location,
@@ -919,7 +933,7 @@ def get_risk_prediction():
 
             segment_info = {
                 "id": str(segment.get("segment_id", nearest_idx)),
-                "LINEAR_NAME": segment.get("LINEAR_NAME", "Unknown"),
+                "LINEAR_NAME": _get_full_street_name(segment),
                 "ROAD_CLASS": segment.get("ROAD_CLASS", "Unknown"),
                 "segment_length": float(segment.get("segment_length", 0)),
                 "num_total_crashes": int(segment.get("num_total_crashes", 0)),
@@ -1095,7 +1109,7 @@ def get_safety_aware_route():
                         "segmentId": seg_id_int,
                         "coordinates": coords,
                         "LINEAR_NAME": (
-                            _safe_str(row.get("LINEAR_NAME"), "Unknown")
+                            _get_full_street_name(row)
                             if row is not None
                             else "Unknown"
                         ),
@@ -1154,7 +1168,7 @@ def get_safety_aware_route():
                     "segment_location": segment_location,
                     "coordinates": coords,
                     "LINEAR_NAME": (
-                        _safe_str(row.get("LINEAR_NAME"), "Unknown")
+                        _get_full_street_name(row)
                         if row is not None
                         else "Unknown"
                     ),
@@ -2065,7 +2079,7 @@ def data_verification():
             inconsistencies = [
                 {
                     "id": str(seg.get("segment_id", idx)),
-                    "street": str(seg.get("LINEAR_NAME", "Unknown")),
+                    "street": _get_full_street_name(seg),
                     "total_crashes": int(seg.get("num_total_crashes", 0)),
                     "ksi_crashes": int(seg.get("num_ksi_crashes", 0)),
                 }
@@ -2084,7 +2098,7 @@ def data_verification():
             sample_segments = [
                 {
                     "id": str(seg.get("segment_id", idx)),
-                    "street": str(seg.get("LINEAR_NAME", "Unknown")),
+                    "street": _get_full_street_name(seg),
                     "total_crashes": int(seg.get("num_total_crashes", 0)),
                     "ksi_crashes": (
                         int(seg.get("num_ksi_crashes", 0))
@@ -2339,7 +2353,7 @@ def get_all_segments():
 
             segment_dict = {
                 "id": str(segment.get("segment_id", idx)),
-                "LINEAR_NAME": str(segment.get("LINEAR_NAME", "Unknown")),
+                "LINEAR_NAME": _get_full_street_name(segment),
                 "ROAD_CLASS": str(
                     segment.get(
                         "ROAD_CLASS", segment.get("LINEAR_NAME_TYPE", "Unknown")
