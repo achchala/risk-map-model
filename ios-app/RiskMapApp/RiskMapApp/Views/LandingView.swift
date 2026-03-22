@@ -26,10 +26,13 @@ struct LandingView: View {
                 Spacer()
 
                 VStack(spacing: 0) {
-                Image(systemName: "map.fill")
-                    .font(.system(size: 56))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .padding(.bottom, 20)
+                Image("StreetSmartLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 220, height: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                    .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 10)
+                    .padding(.bottom, 24)
 
                 Text("StreetSmart")
                     .font(.system(size: 34, weight: .bold, design: .rounded))

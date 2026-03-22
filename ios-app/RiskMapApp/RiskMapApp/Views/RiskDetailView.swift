@@ -58,6 +58,7 @@ struct RiskDetailView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Location")
                                 .font(.headline)
+                            .foregroundColor(.brandPrimary)
                             Map(position: $cameraPosition, interactionModes: [.pan, .zoom]) {
                                 MapPolyline(coordinates: segmentCoordinates)
                                     .stroke(Color(hex: segment.riskLevel.color), style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
@@ -83,12 +84,6 @@ struct RiskDetailView: View {
                             Label(segment.riskLevel.displayName, systemImage: segment.riskLevel.systemImage)
                                 .foregroundColor(Color(hex: segment.riskLevel.color))
                                 .font(.headline)
-
-                            Spacer()
-
-                            Text(confidenceDescription(segment.confidence))
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
                         }
                     }
                     .padding()
@@ -99,6 +94,7 @@ struct RiskDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("What this means")
                             .font(.headline)
+                            .foregroundColor(.brandPrimary)
 
                         Text(plainLanguageSummary)
                             .font(.body)
@@ -114,6 +110,7 @@ struct RiskDetailView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Road Information")
                             .font(.headline)
+                            .foregroundColor(.brandPrimary)
 
                         InfoRow(label: "Road type", value: formatRoadClass(segment.roadClass))
                         InfoRow(label: "Length", value: formatSegmentLength(segment.segmentLength))
@@ -127,6 +124,7 @@ struct RiskDetailView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Crash History")
                                 .font(.headline)
+                                .foregroundColor(.brandPrimary)
 
                             Text("Recorded crashes on this road segment (Toronto Police data):")
                                 .font(.subheadline)
@@ -148,16 +146,17 @@ struct RiskDetailView: View {
                     }
 
                     // Contributing factors (human-readable, ranked by model importance when available)
-                    if let drivers = segment.riskDrivers, !drivers.isEmpty {
+                    if let drivers = segment.riskDrivers, !filteredRiskDrivers(drivers).isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Why this rating?")
                                 .font(.headline)
+                                .foregroundColor(.brandPrimary)
 
                             Text("Our model considers these factors when estimating risk:")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
 
-                            ForEach(Array(sortedRiskDrivers(drivers).prefix(5)), id: \.key) { item in
+                            ForEach(Array(sortedRiskDrivers(filteredRiskDrivers(drivers)).prefix(5)), id: \.key) { item in
                                 HStack(alignment: .top) {
                                     Text(formatDriverLabel(item.key))
                                         .foregroundColor(.secondary)
@@ -174,21 +173,6 @@ struct RiskDetailView: View {
                         .cornerRadius(12)
                     }
 
-                    // Tips for the user
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Stay safe")
-                            .font(.headline)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            TipRow(icon: "eye.fill", text: "Stay alert and scan for hazards")
-                            TipRow(icon: "speedometer", text: "Drive at or below the speed limit")
-                            TipRow(icon: "person.2.fill", text: "Watch for pedestrians and cyclists")
-                            TipRow(icon: "iphone.slash", text: "Avoid distractions")
-                        }
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
                 }
                 .padding()
             }
@@ -199,6 +183,7 @@ struct RiskDetailView: View {
                     Button("Done") {
                         dismiss()
                     }
+                    .foregroundColor(.brandPrimary)
                 }
             }
         }
@@ -206,15 +191,6 @@ struct RiskDetailView: View {
 
     private func isRawCoordinates(_ text: String) -> Bool {
         text.contains("(") && text.contains(")") && text.contains(",") && text.range(of: #"\d+\.\d+"#, options: .regularExpression) != nil
-    }
-
-    private func confidenceDescription(_ confidence: Double) -> String {
-        let pct = Int(confidence * 100)
-        switch pct {
-        case 0..<40: return "\(pct)% confidence (low certainty)"
-        case 40..<70: return "\(pct)% confidence (moderate certainty)"
-        default: return "\(pct)% confidence (high certainty)"
-        }
     }
 
     private var plainLanguageSummary: String {
@@ -245,6 +221,16 @@ struct RiskDetailView: View {
         return "\(Int(meters))m (long)"
     }
 
+    /// Exclude drivers that reflect panel construction time/weather, not meaningful road factors.
+    private func filteredRiskDrivers(_ drivers: [String: Double]) -> [String: Double] {
+        let excludeKeys: Set<String> = [
+            "datetime_hour", "day_of_week", "is_weekend", "month",
+            "temperature", "precipitation", "snow_depth_mm", "wind_speed",
+            "is_freezing", "is_precip"
+        ]
+        return drivers.filter { !excludeKeys.contains($0.key) }
+    }
+
     /// Sort risk drivers by model feature importance when available; otherwise by magnitude.
     private func sortedRiskDrivers(_ drivers: [String: Double]) -> [(key: String, value: Double)] {
         let imp = riskService.featureImportance ?? [:]
@@ -255,22 +241,6 @@ struct RiskDetailView: View {
                 return impA > impB
             }
             return abs(a.value) > abs(b.value)
-        }
-    }
-}
-
-private struct TipRow: View {
-    let icon: String
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon)
-                .foregroundColor(.blue)
-                .frame(width: 24, alignment: .center)
-            Text(text)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
         }
     }
 }
@@ -294,12 +264,12 @@ private func formatDriverLabel(_ key: String) -> String {
         "day_of_week": "Day of week",
         "is_weekend": "Weekend vs weekday",
         "month": "Season",
-        "avg_daily_vol": "Daily traffic volume",
-        "avg_speed": "Average speed",
-        "tmc_daily_ped_vol": "Pedestrian volume",
-        "tmc_daily_cyclist_vol": "Cyclist volume",
+        "avg_daily_vol": "Daily average vehicle volume",
+        "avg_speed": "Typical speed",
+        "tmc_daily_ped_vol": "Daily average pedestrian volume",
+        "tmc_daily_cyclist_vol": "Daily average cyclist volume",
         "is_school_zone": "School zone",
-        "nearby_transit_frequency": "Transit frequency",
+        "nearby_transit_frequency": "Nearby transit frequency",
         "temperature": "Temperature",
         "precipitation": "Precipitation",
         "snow_depth_mm": "Snow depth",

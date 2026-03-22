@@ -5,7 +5,9 @@ serves risk predictions from the trained model
 
 # Reduce chance of double-free in numpy/OpenBLAS/MKL (set before any numeric imports)
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import atexit
+import threading
+import time
 
 # Ensure a usable temp dir (scipy/sklearn need it). Fixes "No usable temporary directory" on some systems.
 _fallback_tmp = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp"))
@@ -28,7 +30,6 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import re
-import subprocess
 from typing import Optional
 import logging
 import sys
@@ -1356,60 +1357,184 @@ def _format_duration_seconds(seconds: float) -> str:
     return f"{minutes}m"
 
 
-def _scrape_google_maps_eta(url: str, timeout_seconds: int = 45, label: str = "route") -> dict:
-    script_path = PROJECT_ROOT / "scripts" / "scrape_google_maps_eta.py"
-    if not script_path.exists():
-        raise FileNotFoundError(f"Scraper script not found: {script_path}")
+_google_playwright = None
+_google_browser = None
+_google_timeout_error = None
+_google_scrape_lock = threading.Lock()
+_GOOGLE_DURATION_RE = re.compile(r"^(?:(?:\d+\s*hr\s*)?\d+\s*min|\d+\s*hr)$", re.IGNORECASE)
 
-    logging.info("[google-eta] START %s scrape", label)
-    completed = subprocess.run(
-        [sys.executable, str(script_path), url, "--timeout", str(timeout_seconds)],
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds + 20,
-        check=False,
-    )
 
-    if completed.returncode != 0:
-        stderr = completed.stderr.strip() or completed.stdout.strip() or "Unknown scraper error"
-        logging.warning("[google-eta] FAIL %s scrape: %s", label, stderr)
-        raise RuntimeError(stderr)
+def _shutdown_google_browser():
+    global _google_browser, _google_playwright
+    if _google_browser is not None:
+        try:
+            _google_browser.close()
+        except Exception:
+            pass
+        _google_browser = None
+    if _google_playwright is not None:
+        try:
+            _google_playwright.stop()
+        except Exception:
+            pass
+        _google_playwright = None
+
+
+def _ensure_google_browser():
+    global _google_browser, _google_playwright, _google_timeout_error
+    if _google_browser is not None and _google_playwright is not None and _google_timeout_error is not None:
+        return _google_browser, _google_timeout_error
 
     try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        logging.warning("[google-eta] FAIL %s scrape: invalid JSON", label)
-        raise RuntimeError("Scraper returned invalid JSON") from exc
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency: playwright. Install with `pip install playwright` and `playwright install chromium`."
+        ) from exc
 
-    best_guess = payload.get("best_guess") or {}
+    _google_playwright = sync_playwright().start()
+    _google_browser = _google_playwright.chromium.launch(
+        headless=True,
+        args=["--disable-dev-shm-usage"],
+    )
+    _google_timeout_error = PlaywrightTimeoutError
+    logging.info("[google-eta] Browser launched")
+    return _google_browser, _google_timeout_error
+
+
+atexit.register(_shutdown_google_browser)
+
+
+def _block_heavy_google_resources(route):
+    request = route.request
+    if request.resource_type in {"image", "media", "font"}:
+        route.abort()
+        return
+    route.continue_()
+
+
+def _scrape_google_candidates(page):
+    return page.evaluate(
+        """
+        () => {
+          const durationRe = /^(?:(?:\\d+\\s*hr\\s*)?\\d+\\s*min|\\d+\\s*hr)$/i;
+          const nodes = [];
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+
+          while (walker.nextNode()) {
+            const textNode = walker.currentNode;
+            const text = (textNode.textContent || "").replace(/\\s+/g, " ").trim();
+            if (!durationRe.test(text)) continue;
+
+            const parent = textNode.parentElement;
+            if (!parent) continue;
+
+            const style = window.getComputedStyle(parent);
+            if (style.visibility === "hidden" || style.display === "none") continue;
+
+            const rect = parent.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) continue;
+
+            nodes.push({
+              text,
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              tag: parent.tagName,
+              ariaLabel: parent.getAttribute("aria-label") || "",
+            });
+          }
+
+          const deduped = [];
+          const seen = new Set();
+          for (const node of nodes) {
+            const key = `${node.text}|${Math.round(node.x)}|${Math.round(node.y)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            deduped.push(node);
+          }
+
+          deduped.sort((a, b) => {
+            if (Math.abs(a.y - b.y) > 12) return a.y - b.y;
+            return a.x - b.x;
+          });
+
+          return deduped;
+        }
+        """
+    )
+
+
+def _pick_best_google_candidate(candidates):
+    enriched = []
+    for item in candidates or []:
+        text = str(item.get("text", "")).strip()
+        if not _GOOGLE_DURATION_RE.match(text):
+            continue
+        minutes = 0
+        hr_match = re.search(r"(\d+)\s*hr", text.lower())
+        min_match = re.search(r"(\d+)\s*min", text.lower())
+        if hr_match:
+            minutes += int(hr_match.group(1)) * 60
+        if min_match:
+            minutes += int(min_match.group(1))
+        enriched.append({**item, "minutes": minutes})
+
+    if not enriched:
+        return None
+
+    directions_panel = [c for c in enriched if c["x"] < 700 and c["y"] < 900]
+    return directions_panel[0] if directions_panel else enriched[0]
+
+
+def _scrape_google_maps_eta_with_page(page, url: str, timeout_seconds: int = 10, label: str = "route") -> dict:
+    logging.info("[google-eta] START %s scrape", label)
+    try:
+        page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_timeout(700)
+    except _google_timeout_error:
+        logging.warning("[google-eta] FAIL %s scrape: timed out waiting for page", label)
+        raise RuntimeError("Timed out waiting for Google Maps to load")
+
+    candidates = []
+    deadline = time.monotonic() + min(float(timeout_seconds), 4.0)
+    while time.monotonic() < deadline:
+        candidates = _scrape_google_candidates(page)
+        if candidates:
+            break
+        page.wait_for_timeout(250)
+
+    best_guess = _pick_best_google_candidate(candidates)
     seconds = None
-    if best_guess.get("minutes") is not None:
+    if best_guess and best_guess.get("minutes") is not None:
         parsed_seconds = float(best_guess["minutes"]) * 60.0
         if parsed_seconds > 0:
             seconds = parsed_seconds
     if seconds is None:
-        seconds = _google_duration_text_to_seconds(best_guess.get("text", ""))
+        seconds = _google_duration_text_to_seconds((best_guess or {}).get("text", ""))
 
     if seconds is None:
         logging.warning(
             "[google-eta] FAIL %s scrape: no ETA found (candidate_count=%s)",
             label,
-            payload.get("candidate_count", 0),
+            len(candidates),
         )
-        raise RuntimeError("No ETA found in scraper output")
+        raise RuntimeError("No ETA found in Google Maps page")
 
     logging.info(
         "[google-eta] SUCCESS %s scrape: %s from '%s' (candidates=%s)",
         label,
         _format_duration_seconds(seconds),
-        best_guess.get("text", ""),
-        payload.get("candidate_count", 0),
+        best_guess.get("text", "") if best_guess else "",
+        len(candidates),
     )
     return {
         "seconds": seconds,
         "best_guess": best_guess,
-        "candidate_count": payload.get("candidate_count", 0),
-        "url": payload.get("url", url),
+        "candidate_count": len(candidates),
+        "url": url,
     }
 
 
@@ -1429,6 +1554,7 @@ def debug_google_maps_eta():
     etas_seconds = {}
     failures = {}
     details = {}
+    sources = {}
 
     valid_items = []
     for name, url in urls.items():
@@ -1437,37 +1563,53 @@ def debug_google_maps_eta():
             continue
         valid_items.append((name, url.strip()))
 
-    with ThreadPoolExecutor(max_workers=max(1, min(4, len(valid_items)))) as executor:
-        future_to_name = {
-            executor.submit(_scrape_google_maps_eta, url, 45, name): name for name, url in valid_items
-        }
-        for future in as_completed(future_to_name):
-            name = future_to_name[future]
+    with _google_scrape_lock:
+        context = None
+        page = None
+        try:
+            browser, _ = _ensure_google_browser()
+            context = browser.new_context(viewport={"width": 1440, "height": 1200})
+            context.route("**/*", _block_heavy_google_resources)
+            page = context.new_page()
+            page.set_default_timeout(10000)
+
+            for name, url in valid_items:
+                try:
+                    scraped = _scrape_google_maps_eta_with_page(page, url, 10, name)
+                    etas_seconds[name] = float(scraped["seconds"])
+                    sources[name] = "google"
+                    details[name] = {
+                        "best_guess": scraped["best_guess"],
+                        "candidate_count": scraped["candidate_count"],
+                        "url": scraped["url"],
+                    }
+                except Exception as exc:
+                    failures[name] = str(exc)
+                    logging.warning("[google-eta] FAIL %s scrape: %s", name, exc)
+        finally:
             try:
-                scraped = future.result()
-                etas_seconds[name] = float(scraped["seconds"])
-                details[name] = {
-                    "best_guess": scraped["best_guess"],
-                    "candidate_count": scraped["candidate_count"],
-                    "url": scraped["url"],
-                }
-            except subprocess.TimeoutExpired:
-                failures[name] = "Timed out scraping Google Maps"
-                logging.warning("[google-eta] FAIL %s scrape: timed out", name)
-            except Exception as exc:
-                failures[name] = str(exc)
-                logging.warning("[google-eta] FAIL %s scrape: %s", name, exc)
+                if page is not None:
+                    page.close()
+            except Exception:
+                pass
+            try:
+                if context is not None:
+                    context.close()
+            except Exception:
+                pass
 
     logging.info(
-        "[google-eta] RESPONSE etas=%s failures=%s",
+        "[google-eta] RESPONSE etas=%s failures=%s sources=%s",
         {k: _format_duration_seconds(v) for k, v in etas_seconds.items()},
         failures,
+        sources,
     )
 
     return jsonify({
         "etasSeconds": etas_seconds,
         "failures": failures,
         "details": details,
+        "sources": sources,
     })
 
 

@@ -60,13 +60,7 @@ class RouteService: ObservableObject {
                     self.lastRouteSource = "backend"
                     self.isLoading = false
                 }
-                refreshScrapedGoogleMapsETAs(
-                    requestID: requestID,
-                    start: start,
-                    destination: destination,
-                    optimalRoute: optimalRoute,
-                    saferRoute: saferRoute
-                )
+                refreshScrapedGoogleMapsETAs(requestID: requestID, start: start, destination: destination)
                 return
             }
 
@@ -85,13 +79,7 @@ class RouteService: ObservableObject {
                 self.lastRouteSource = "mapkit"
                 self.isLoading = false
             }
-            refreshScrapedGoogleMapsETAs(
-                requestID: requestID,
-                start: start,
-                destination: destination,
-                optimalRoute: optimalRoute,
-                saferRoute: saferRoute
-            )
+            refreshScrapedGoogleMapsETAs(requestID: requestID, start: start, destination: destination)
         } catch {
             await MainActor.run {
                 self.errorMessage = error.localizedDescription
@@ -103,64 +91,71 @@ class RouteService: ObservableObject {
     private func refreshScrapedGoogleMapsETAs(
         requestID: UUID,
         start: CLLocationCoordinate2D,
-        destination: CLLocationCoordinate2D,
-        optimalRoute: Route,
-        saferRoute: Route
+        destination: CLLocationCoordinate2D
     ) {
         Task { [weak self] in
             guard let self else { return }
-            let scrapedETAs = await self.fetchScrapedGoogleMapsETAs(
-                from: start,
-                to: destination,
-                optimalRoute: optimalRoute,
-                saferRoute: saferRoute
+            await self.refreshSingleGoogleMapsETA(
+                requestID: requestID,
+                routeName: "fastest",
+                routeType: .optimal,
+                route: self.optimalRoute,
+                start: start,
+                destination: destination
             )
-            guard scrapedETAs.fastest != nil || scrapedETAs.safer != nil else {
-                return
-            }
-            await MainActor.run {
-                guard self.activeRouteRequestID == requestID else { return }
-                if var updatedOptimal = self.optimalRoute, let fastestETA = scrapedETAs.fastest {
-                    updatedOptimal.estimatedTime = fastestETA
+            await self.refreshSingleGoogleMapsETA(
+                requestID: requestID,
+                routeName: "safer",
+                routeType: .safer,
+                route: self.saferRoute,
+                start: start,
+                destination: destination
+            )
+        }
+    }
+
+    private func refreshSingleGoogleMapsETA(
+        requestID: UUID,
+        routeName: String,
+        routeType: Route.RouteType,
+        route: Route?,
+        start: CLLocationCoordinate2D,
+        destination: CLLocationCoordinate2D
+    ) async {
+        guard let route, let url = route.googleMapsURL(origin: start, destination: destination) else {
+            return
+        }
+
+        let eta = await self.fetchSingleScrapedGoogleMapsETA(routeName: routeName, url: url)
+        guard let eta else { return }
+        await MainActor.run {
+            guard self.activeRouteRequestID == requestID else { return }
+            switch routeType {
+            case .optimal:
+                if var updatedOptimal = self.optimalRoute {
+                    updatedOptimal.estimatedTime = eta
                     self.optimalRoute = updatedOptimal
                 }
-                if var updatedSafer = self.saferRoute, let saferETA = scrapedETAs.safer {
-                    updatedSafer.estimatedTime = saferETA
+            case .safer:
+                if var updatedSafer = self.saferRoute {
+                    updatedSafer.estimatedTime = eta
                     self.saferRoute = updatedSafer
                 }
             }
         }
     }
 
-    private func fetchScrapedGoogleMapsETAs(
-        from start: CLLocationCoordinate2D,
-        to destination: CLLocationCoordinate2D,
-        optimalRoute: Route,
-        saferRoute: Route
-    ) async -> (fastest: TimeInterval?, safer: TimeInterval?) {
-        var namedURLs: [String: String] = [:]
-        if let fastestURL = optimalRoute.googleMapsURL(origin: start, destination: destination) {
-            namedURLs["fastest"] = fastestURL
-        }
-        if let saferURL = saferRoute.googleMapsURL(origin: start, destination: destination) {
-            namedURLs["safer"] = saferURL
-        }
-        guard !namedURLs.isEmpty else {
-            return (nil, nil)
-        }
-
+    private func fetchSingleScrapedGoogleMapsETA(routeName: String, url: String) async -> TimeInterval? {
         do {
-            let response = try await withTimeout(seconds: 35) {
-                try await self.riskService.fetchGoogleMapsETAs(namedURLs: namedURLs)
+            let response = try await withTimeout(seconds: 20) {
+                try await self.riskService.fetchGoogleMapsETAs(namedURLs: [routeName: url])
             }
-            print("[google-eta] applying scraped ETAs fastest=\(String(describing: response.etasSeconds["fastest"])) safer=\(String(describing: response.etasSeconds["safer"]))")
-            return (
-                response.etasSeconds["fastest"],
-                response.etasSeconds["safer"]
-            )
+            let eta = response.etasSeconds[routeName]
+            print("[google-eta] applying \(routeName) ETA=\(String(describing: eta)) sources=\(response.sources ?? [:]) failures=\(response.failures)")
+            return eta
         } catch {
-            print("[google-eta] scrape request failed: \(error.localizedDescription)")
-            return (nil, nil)
+            print("[google-eta] \(routeName) scrape request failed: \(error.localizedDescription)")
+            return nil
         }
     }
 

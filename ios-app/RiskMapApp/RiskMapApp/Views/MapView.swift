@@ -55,6 +55,11 @@ struct MapView: View {
                 MapCompass()
                 MapScaleView()
             }
+            .overlay(alignment: .topLeading) {
+                RiskMapLegend()
+                    .padding(.top, 12)
+                    .padding(.leading, 12)
+            }
             .overlay(alignment: .bottomTrailing) {
                 Button {
                     cameraPosition = .region(MKCoordinateRegion(
@@ -63,6 +68,7 @@ struct MapView: View {
                     ))
                 } label: {
                     Image(systemName: "location.fill")
+                        .foregroundColor(.brandPrimary)
                         .font(.title2)
                         .padding(10)
                         .background(.ultraThinMaterial)
@@ -83,8 +89,9 @@ struct MapView: View {
             // loading indicator
             if riskService.isLoading {
                 ProgressView("Loading risk data...")
+                    .tint(.brandPrimary)
                     .padding()
-                    .background(Color.white.opacity(0.8))
+                    .background(Color.white.opacity(0.88))
                     .cornerRadius(10)
             }
             
@@ -148,6 +155,32 @@ struct MapView: View {
     }
 }
 
+struct RiskMapLegend: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Risk Legend")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundColor(.primary)
+
+            ForEach(RiskLevel.allCases, id: \.self) { level in
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color(hex: level.color))
+                        .frame(width: 10, height: 10)
+                    Text(level.displayName)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(10)
+        .background(Color(.systemBackground).opacity(0.92))
+        .cornerRadius(10)
+        .shadow(radius: 4)
+    }
+}
+
 // MARK: - segment tooltip (shown when user taps a road segment)
 struct SegmentTooltipView: View {
     let segment: RoadSegment
@@ -165,11 +198,6 @@ struct SegmentTooltipView: View {
                             .font(.subheadline)
                             .fontWeight(.medium)
                             .foregroundColor(Color(hex: segment.riskLevel.color))
-                        Text("•")
-                            .foregroundColor(.secondary)
-                        Text("\(Int(segment.confidence * 100))% confidence")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
                     }
                 }
                 Spacer()
@@ -192,6 +220,7 @@ struct SegmentTooltipView: View {
             }
             .font(.subheadline)
             .fontWeight(.medium)
+            .foregroundColor(.brandPrimary)
         }
         .padding()
         .background(Color(UIColor.systemBackground))
@@ -252,5 +281,12 @@ extension Color {
             opacity: Double(a) / 255
         )
     }
+
+    static let brandPrimary = Color(hex: "2F3B69")
+    static let brandSecondary = Color(hex: "00BF63")
+    static let brandTertiary = Color(hex: "009FC1")
+    static let brandPrimarySoft = Color.brandPrimary.opacity(0.14)
+    static let brandSecondarySoft = Color.brandSecondary.opacity(0.14)
+    static let brandTertiarySoft = Color.brandTertiary.opacity(0.14)
 }
 

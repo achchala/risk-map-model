@@ -128,44 +128,28 @@ struct RouteNavigationView: View {
             case .sleet: Image(systemName: "cloud.sleet.fill")
             }
         }
-        .foregroundColor(.blue)
+        .foregroundColor(.brandTertiary)
     }
 
     @ViewBuilder
     private var routeLegend: some View {
         if routeService.saferRoute != nil || routeService.optimalRoute != nil {
             VStack(alignment: .leading, spacing: 8) {
-                // Routing algorithm indicator
-                HStack(spacing: 6) {
-                    Image(systemName: (routeService.lastRouteSource ?? "") == "backend" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundColor((routeService.lastRouteSource ?? "") == "backend" ? .green : .orange)
-                        .font(.caption)
-                    Text((routeService.lastRouteSource ?? "") == "backend"
-                         ? "MapKit fastest + backend safer"
-                         : "MapKit fallback (backend unavailable)")
-                        .font(.caption2)
-                        .foregroundColor((routeService.lastRouteSource ?? "") == "backend" ? .green : .orange)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background((routeService.lastRouteSource == "backend" ? Color.green : Color.orange).opacity(0.15))
-                .cornerRadius(6)
-
                 if routeService.optimalRoute != nil {
                     HStack(spacing: 8) {
-                        Rectangle().fill(.orange).frame(width: 20, height: 4)
+                        Rectangle().fill(Color.brandTertiary).frame(width: 20, height: 4)
                         Text("Fastest Route").font(.caption)
                     }
                 }
                 if routeService.saferRoute != nil {
                     HStack(spacing: 8) {
-                        Rectangle().fill(.blue).frame(width: 20, height: 4)
+                        Rectangle().fill(Color.brandPrimary).frame(width: 20, height: 4)
                         Text("Safest Route").font(.caption)
                     }
                 }
                 if selectedRoute != nil {
                     HStack(spacing: 8) {
-                        Rectangle().fill(.purple).frame(width: 20, height: 4)
+                        Rectangle().fill(Color.brandSecondary).frame(width: 20, height: 4)
                         Text("Selected").font(.caption)
                     }
                 }
@@ -199,7 +183,7 @@ struct RouteNavigationView: View {
         if let userLocation = locationManager.location {
             Annotation("My Location", coordinate: userLocation.coordinate) {
                 Image(systemName: "location.circle.fill")
-                    .foregroundColor(.blue)
+                    .foregroundColor(.brandTertiary)
                     .font(.title)
                     .background(Circle().fill(Color.white))
             }
@@ -207,14 +191,14 @@ struct RouteNavigationView: View {
         if let start = startCoordinate {
             Annotation("Start", coordinate: start) {
                 Image(systemName: "mappin.circle.fill")
-                    .foregroundColor(.green)
+                    .foregroundColor(.brandPrimary)
                     .font(.title)
             }
         }
         if let dest = destinationCoordinate {
             Annotation("Destination", coordinate: dest) {
                 Image(systemName: "flag.circle.fill")
-                    .foregroundColor(.red)
+                    .foregroundColor(.brandSecondary)
                     .font(.title)
             }
         }
@@ -235,7 +219,7 @@ struct RouteNavigationView: View {
                 MapPolyline(coordinates: coords)
                     .stroke(.white, style: StrokeStyle(lineWidth: isSelected ? 14 : 12, lineCap: .round, lineJoin: .round))
                 MapPolyline(coordinates: coords)
-                    .stroke(isSelected ? .purple : .orange, style: StrokeStyle(lineWidth: isSelected ? 10 : 8, lineCap: .round, lineJoin: .round))
+                    .stroke(isSelected ? Color.brandSecondary : Color.brandTertiary, style: StrokeStyle(lineWidth: isSelected ? 10 : 8, lineCap: .round, lineJoin: .round))
             }
         }
 
@@ -249,12 +233,12 @@ struct RouteNavigationView: View {
                     MapPolyline(coordinates: coords)
                         .stroke(.white, style: StrokeStyle(lineWidth: isSelected ? 16 : 14, lineCap: .round, lineJoin: .round))
                     MapPolyline(coordinates: coords)
-                        .stroke(isSelected ? .purple : .blue, style: StrokeStyle(lineWidth: isSelected ? 12 : 10, lineCap: .round, lineJoin: .round))
+                        .stroke(isSelected ? Color.brandSecondary : Color.brandPrimary, style: StrokeStyle(lineWidth: isSelected ? 12 : 10, lineCap: .round, lineJoin: .round))
                 } else {
                     MapPolyline(coordinates: coords)
                         .stroke(.white, style: StrokeStyle(lineWidth: isSelected ? 14 : 12, lineCap: .round, lineJoin: .round))
                     MapPolyline(coordinates: coords)
-                        .stroke(isSelected ? .purple : .blue.opacity(0.8), style: StrokeStyle(lineWidth: isSelected ? 10 : 8, lineCap: .round, lineJoin: .round, dash: [15, 8]))
+                        .stroke(isSelected ? Color.brandSecondary : Color.brandPrimary.opacity(0.8), style: StrokeStyle(lineWidth: isSelected ? 10 : 8, lineCap: .round, lineJoin: .round, dash: [15, 8]))
                 }
             }
         }
@@ -277,12 +261,12 @@ struct RouteNavigationView: View {
             HStack(spacing: 12) {
                 Button(action: useCurrentLocationAsStart) {
                     Image(systemName: "location.fill")
-                        .foregroundColor(.blue)
+                        .foregroundColor(.brandTertiary)
                 }
                 AddressSearchField(
                     placeholder: "Start location",
                     iconName: "mappin.circle.fill",
-                    iconColor: .green,
+                    iconColor: .brandPrimary,
                     text: $startPoint
                 ) { coord in
                     startCoordinate = coord
@@ -296,7 +280,7 @@ struct RouteNavigationView: View {
             AddressSearchField(
                 placeholder: "Destination",
                 iconName: "flag.fill",
-                iconColor: .red,
+                iconColor: .brandSecondary,
                 text: $destination
             ) { coord in
                 destinationCoordinate = coord
@@ -316,7 +300,7 @@ struct RouteNavigationView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding()
-                .background((startCoordinate != nil && destinationCoordinate != nil) ? Color.blue : Color.gray)
+                .background((startCoordinate != nil && destinationCoordinate != nil) ? Color.brandPrimary : Color.gray)
                 .foregroundColor(.white)
                 .cornerRadius(10)
             }
@@ -497,21 +481,6 @@ struct RouteComparisonCard: View {
             if isExpanded {
                 ScrollView {
                     VStack(spacing: 16) {
-                        // Routing algorithm status
-                        HStack(spacing: 8) {
-                            Image(systemName: (routeSource ?? "") == "backend" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                .foregroundColor((routeSource ?? "") == "backend" ? .green : .orange)
-                            Text((routeSource ?? "") == "backend"
-                                 ? "Hybrid routing: Fastest from MapKit, safer route from backend graph"
-                                 : "MapKit fallback: Backend unavailable — routes may be identical")
-                                .font(.caption)
-                                .foregroundColor((routeSource ?? "") == "backend" ? .secondary : .orange)
-                            Spacer()
-                        }
-                        .padding()
-                        .background((routeSource ?? "") == "backend" ? Color.green.opacity(0.08) : Color.orange.opacity(0.08))
-                        .cornerRadius(8)
-
                         if routesAreSame {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "info.circle.fill").foregroundColor(.orange)
@@ -528,7 +497,7 @@ struct RouteComparisonCard: View {
                             route: saferRoute,
                             title: "Safest Route",
                             subtitle: routesAreSame ? "Same as fastest route" : saferRoute.safetyExplanation(comparedTo: optimalRoute),
-                            color: .blue,
+                            color: .brandPrimary,
                             isSelected: selectedRoute?.id == saferRoute.id
                         ) { selectedRoute = saferRoute }
 
@@ -536,13 +505,13 @@ struct RouteComparisonCard: View {
                             route: optimalRoute,
                             title: "Fastest Route",
                             subtitle: routesAreSame ? "Same as safest route" : "Shortest travel time",
-                            color: .orange,
+                            color: .brandTertiary,
                             isSelected: selectedRoute?.id == optimalRoute.id
                         ) { selectedRoute = optimalRoute }
 
                         if let weather = currentWeather {
                             HStack(spacing: 12) {
-                                Image(systemName: "cloud.fill").foregroundColor(.blue)
+                                Image(systemName: "cloud.fill").foregroundColor(.brandTertiary)
                                 Text("\(weather.condition.displayName) • \(timeOfDayLabel())")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
@@ -557,10 +526,10 @@ struct RouteComparisonCard: View {
                             if let timeDifference = comparison.timeDifference {
                                 Image(systemName: "clock")
                                 Text("Time diff: \(formatTime(timeDifference))")
-                                    .foregroundColor((comparison.saferRouteSlower ?? false) ? .orange : .green)
+                                    .foregroundColor((comparison.saferRouteSlower ?? false) ? .brandTertiary : .brandPrimary)
                             }
                             Image(systemName: "shield.checkered")
-                            Text(comparison.safetyImprovement).foregroundColor(.blue)
+                            Text(comparison.safetyImprovement).foregroundColor(.brandPrimary)
                         }
                         .font(.subheadline)
                         .padding()
@@ -572,7 +541,7 @@ struct RouteComparisonCard: View {
                                 Label("Apple Maps", systemImage: "map.fill")
                                     .frame(maxWidth: .infinity)
                                     .padding()
-                                    .background(Color.blue)
+                                    .background(Color.brandTertiary)
                                     .foregroundColor(.white)
                                     .cornerRadius(10)
                             }
@@ -580,7 +549,7 @@ struct RouteComparisonCard: View {
                                 Label("Google Maps", systemImage: "globe")
                                     .frame(maxWidth: .infinity)
                                     .padding()
-                                    .background(Color.green)
+                                    .background(Color.brandPrimary)
                                     .foregroundColor(.white)
                                     .cornerRadius(10)
                             }
@@ -634,7 +603,7 @@ struct RouteOptionCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text(title).font(.headline)
-                        if isSelected { Image(systemName: "checkmark.circle.fill").foregroundColor(.green) }
+                        if isSelected { Image(systemName: "checkmark.circle.fill").foregroundColor(.brandSecondary) }
                     }
                     Text(subtitle).font(.caption).foregroundColor(.secondary)
                     HStack(spacing: 16) {

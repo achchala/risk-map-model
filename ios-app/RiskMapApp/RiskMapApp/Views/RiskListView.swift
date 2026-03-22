@@ -69,17 +69,11 @@ struct RiskListRow: View {
             }
             
             Spacer()
-            
-            VStack(alignment: .trailing) {
-                Text(segment.riskLevel.displayName)
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundColor(Color(hex: segment.riskLevel.color))
-                
-                Text("\(Int(segment.confidence * 100))%")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
+
+            Text(segment.riskLevel.displayName)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundColor(Color(hex: segment.riskLevel.color))
         }
         .padding(.vertical, 4)
     }
