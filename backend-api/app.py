@@ -389,7 +389,17 @@ def _get_risk_driver_features_for_segment(segment_id):
                 drivers[k] = v
         except (TypeError, ValueError):
             continue
-    return drivers
+    # Filter out panel-time/weather drivers before sending to client
+    EXCLUDED_DRIVER_KEYS = {
+        "datetime_hour", "hour_of_day", "hour_sin", "hour_cos",
+        "day_of_week", "is_weekend", "dow_sin", "dow_cos",
+        "month", "month_sin", "month_cos", "season_int",
+        "temperature", "precipitation", "snow_depth_mm", "snow_mm",
+        "wind_speed", "is_freezing", "is_precip", "visibility",
+        "weather_condition", "is_missing_weather",
+        "is_school_active_hour",
+    }
+    return {k: v for k, v in drivers.items() if k not in EXCLUDED_DRIVER_KEYS}
 
 
 _FEATURE_LABELS = {
@@ -525,9 +535,26 @@ def _build_risk_explanation(
             return -abs(v)  # fallback: magnitude
         return 0
 
+    # Skip panel-time/weather factors (encode when panel was built, not fixed road properties)
+    _EXCLUDE_FROM_EXPLANATION = {
+        # Time of day
+        "datetime_hour", "hour_of_day", "hour_sin", "hour_cos",
+        # Day of week
+        "day_of_week", "is_weekend", "dow_sin", "dow_cos",
+        # Month / season
+        "month", "month_sin", "month_cos", "season_int",
+        # Weather (conditions when panel was built)
+        "temperature", "precipitation", "snow_depth_mm", "snow_mm",
+        "wind_speed", "is_freezing", "is_precip", "visibility",
+        "weather_condition", "is_missing_weather",
+        # Context tied to time
+        "is_school_active_hour",
+    }
     sorted_items = sorted(drivers.items(), key=sort_key)
 
     for k, v in sorted_items:
+        if k in _EXCLUDE_FROM_EXPLANATION:
+            continue
         if v is None or (isinstance(v, (int, float)) and v == 0):
             continue
         if k.startswith("road_class_") and isinstance(v, (int, float)) and v == 1:
