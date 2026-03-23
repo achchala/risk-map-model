@@ -55,6 +55,7 @@ struct RoadSegment: Identifiable, Codable, Equatable {
     let segmentLocation: String?
     let riskDrivers: [String: Double]?
     let riskExplanation: String?
+    let lambdaPerHour: Double?
     
     struct Coordinate: Codable, Equatable {
         let latitude: Double
@@ -75,6 +76,7 @@ struct RoadSegment: Identifiable, Codable, Equatable {
         case segmentLocation = "segment_location"
         case riskDrivers
         case riskExplanation = "risk_explanation"
+        case lambdaPerHour = "lambda_per_hour"
     }
 }
 
@@ -467,6 +469,8 @@ enum APIError: Error, LocalizedError {
     case decodingError
     case serverError(String)
     case networkError(Error)
+    /// Origin or destination is outside the Toronto road network (safety data coverage).
+    case outOfBounds(String?)
     
     var errorDescription: String? {
         switch self {
@@ -480,6 +484,8 @@ enum APIError: Error, LocalizedError {
             return "Server error: \(message)"
         case .networkError(let error):
             return "Network error: \(error.localizedDescription)"
+        case .outOfBounds:
+            return "Route is outside the app's coverage area"
         }
     }
 }

@@ -15,14 +15,33 @@ struct HomeView: View {
     var body: some View {
         NavigationView {
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
+                VStack(spacing: 28) {
                     headerSection
                     whatIsRiskSection
                     quickActionsSection
                 }
-                .padding()
+                .padding(20)
+                .padding(.bottom, 32)
             }
-            .background(Color(UIColor.systemGroupedBackground))
+            .background(
+                ZStack {
+                    Image("mapoverlay")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 1000)
+                        .rotationEffect(.degrees(90))
+                        .opacity(0.15)
+                        .ignoresSafeArea()
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.92, green: 0.95, blue: 1.0).opacity(0.85),
+                            Color(UIColor.systemGroupedBackground)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+            )
             .navigationTitle("Home")
             .navigationBarTitleDisplayMode(.large)
             .onAppear { loadRiskDefinition() }
@@ -30,88 +49,156 @@ struct HomeView: View {
     }
 
     private var headerSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("StreetSmart")
-                .font(.title)
-                .fontWeight(.bold)
-            Text("See Risk Before It Happens")
-                .font(.subheadline)
-                .fontWeight(.medium)
-                .foregroundColor(.secondary)
-            Text("AI-Powered Risk-Aware Navigation")
-                .font(.caption)
-                .foregroundColor(.secondary.opacity(0.9))
+        VStack(spacing: 0) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.brandPrimary, Color.brandPrimary.opacity(0.85)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(height: 140)
+                    .shadow(color: Color.brandPrimary.opacity(0.3), radius: 12, y: 6)
+                VStack(spacing: 10) {
+                    Image("streetsmart_white")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 48)
+                    Text("StreetSmart")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+                    Text("See risk before it happens")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.white.opacity(0.95))
+                    Text("Toronto")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.8))
+                }
+            }
+            .cornerRadius(20)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color(UIColor.systemBackground))
-        .cornerRadius(12)
     }
 
     private var whatIsRiskSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("What is a risky road?")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image(systemName: "shield.checkered")
+                    .font(.title3)
+                    .foregroundColor(.brandPrimary)
+                Text("What is a risky road?")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.primary)
+            }
             if let def = riskDefinition {
-                Text(def.description)
+                Text("Risk is based on predicted crash rate (λ) per road segment. Each segment is ranked by its predicted crash likelihood.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(def.low, systemImage: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundColor(.green)
-                    Label(def.medium, systemImage: "exclamationmark.circle.fill")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                    Label(def.high, systemImage: "xmark.circle.fill")
-                        .font(.caption)
-                        .foregroundColor(.red)
+                    .lineSpacing(4)
+                VStack(alignment: .leading, spacing: 10) {
+                    riskLevelRow(icon: "checkmark.circle.fill", color: Color.brandSecondary, text: def.low)
+                    riskLevelRow(icon: "exclamationmark.circle.fill", color: Color.orange, text: def.medium)
+                    riskLevelRow(icon: "xmark.circle.fill", color: Color.red, text: def.high)
                 }
                 .padding(.top, 4)
             } else {
-                Text("Risk is based on predicted crash rate (λ) per segment. Low = bottom 70% of segments, Medium = 70th–90th percentile, High = top 10%. Thresholds come from the current model.")
+                Text("Risk is based on predicted crash rate (λ) per road segment. Each segment is ranked by its predicted crash likelihood.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                Text("Tap to load latest thresholds from server.")
+                    .lineSpacing(4)
+                Text("Loading latest thresholds…")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
         }
-        .padding()
+        .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(UIColor.systemBackground))
-        .cornerRadius(12)
+        .cornerRadius(16)
+        .shadow(color: .black.opacity(0.06), radius: 10, y: 4)
+    }
+
+    private func riskLevelRow(icon: String, color: Color, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.body)
+                .foregroundColor(color)
+            Text(text)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
     }
 
     private var quickActionsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Quick actions")
-                .font(.headline)
-            HStack(spacing: 12) {
-                Button(action: { selectedTab = 1 }) {
-                    Label("View map", systemImage: "map")
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.blue.opacity(0.15))
-                        .foregroundColor(.blue)
-                        .cornerRadius(10)
-                }
-                .buttonStyle(.plain)
-                Button(action: { selectedTab = 3 }) {
-                    Label("Plan route", systemImage: "location.north.circle")
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.green.opacity(0.15))
-                        .foregroundColor(.green)
-                        .cornerRadius(10)
-                }
-                .buttonStyle(.plain)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.fill")
+                    .font(.title3)
+                    .foregroundColor(.brandTertiary)
+                Text("Quick actions")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.primary)
             }
+            HStack(spacing: 14) {
+                quickActionButton(
+                    title: "View map",
+                    icon: "map.fill",
+                    color: .brandPrimary
+                ) { selectedTab = 1 }
+                quickActionButton(
+                    title: "Plan route",
+                    icon: "arrow.triangle.turn.up.right.diamond.fill",
+                    color: .brandSecondary
+                ) { selectedTab = 3 }
+            }
+            tipSection
         }
-        .padding()
+        .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(UIColor.systemBackground))
-        .cornerRadius(12)
+        .cornerRadius(16)
+        .shadow(color: .black.opacity(0.06), radius: 10, y: 4)
+    }
+
+    private var tipSection: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "slider.horizontal.3")
+                .font(.caption)
+                .foregroundColor(.brandTertiary)
+            Text("To customize your experience based on your personal risk tolerance, go to \"How Risk Averse Are You?\" on the Settings page.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.brandTertiary.opacity(0.08))
+        .cornerRadius(10)
+        .padding(.top, 4)
+    }
+
+    private func quickActionButton(title: String, icon: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 26))
+                    .foregroundColor(color)
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(color)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+            .background(color.opacity(0.12))
+            .cornerRadius(14)
+        }
+        .buttonStyle(.plain)
     }
 
     private func loadRiskDefinition() {

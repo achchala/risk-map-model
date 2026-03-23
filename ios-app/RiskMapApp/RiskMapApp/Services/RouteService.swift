@@ -17,6 +17,8 @@ class RouteService: ObservableObject {
     @Published var errorMessage: String?
     /// "backend" when using Toronto graph routing; "mapkit" when fallback. Use to explain why routes may be identical.
     @Published var lastRouteSource: String? = nil
+    /// True when origin/destination is outside the Toronto road network; show "out of bounds" message.
+    @Published var isOutOfBounds: Bool = false
 
     private let riskService: RiskService
     private let weatherService: WeatherService
@@ -27,13 +29,19 @@ class RouteService: ObservableObject {
         self.weatherService = weatherService
     }
 
-    func calculateRoutes(from start: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D) async {
+    func calculateRoutes(
+        from start: CLLocationCoordinate2D,
+        to destination: CLLocationCoordinate2D,
+        weather: WeatherData? = nil,
+        timeOfDay: (hour: Int, isWeekend: Bool)? = nil
+    ) async {
         let requestID = UUID()
         await MainActor.run {
             self.activeRouteRequestID = requestID
             isLoading = true
             errorMessage = nil
             lastRouteSource = nil
+            isOutOfBounds = false
         }
 
         do {
@@ -43,43 +51,50 @@ class RouteService: ObservableObject {
                 try await self.calculateOptimalRoute(from: start, to: destination)
             }
 
-            var optimalRoute = try await withTimeout(seconds: 20) {
+            var analyzedOptimal = try await withTimeout(seconds: 20) {
                 try await self.analyzeRoute(optimalMKRoute, type: .optimal)
             }
-            optimalRoute.estimatedTime = nil
+            analyzedOptimal.estimatedTime = nil
 
-            if let safer = try? await fetchBackendSaferRoute(
-                from: start,
-                to: destination
-            ) {
-                var saferRoute = safer
-                saferRoute.estimatedTime = nil
+            do {
+                let safer = try await fetchBackendSaferRoute(from: start, to: destination, weather: weather, timeOfDay: timeOfDay)
+                var analyzedSafer = safer
+                analyzedSafer.estimatedTime = nil
+                let finalOptimal = analyzedOptimal
+                let finalSafer = analyzedSafer
                 await MainActor.run {
-                    self.optimalRoute = optimalRoute
-                    self.saferRoute = saferRoute
+                    self.optimalRoute = finalOptimal
+                    self.saferRoute = finalSafer
                     self.lastRouteSource = "backend"
                     self.isLoading = false
                 }
-                refreshScrapedGoogleMapsETAs(requestID: requestID, start: start, destination: destination)
+                refreshScrapedGoogleMapsETAs(requestID: requestID, start: start, destination: destination, optimalRoute: finalOptimal, saferRoute: finalSafer)
                 return
+            } catch APIError.outOfBounds {
+                await MainActor.run { self.isOutOfBounds = true }
+                // Fall through to MapKit fallback
+            } catch {
+                // Other errors (network, etc.) — also fall back to MapKit
             }
 
             // Fallback: MapKit for both (outside Toronto or backend unavailable)
             let saferMKRoute = try await withTimeout(seconds: 30) {
                 try await self.calculateSaferRoute(from: start, to: destination, timePenaltyFactor: self.currentTimePenaltyFactor)
             }
-            var saferRoute = try await withTimeout(seconds: 20) {
+            var analyzedSafer = try await withTimeout(seconds: 20) {
                 try await self.analyzeRoute(saferMKRoute, type: .safer)
             }
-            saferRoute.estimatedTime = nil
+            analyzedSafer.estimatedTime = nil
 
+            let finalOptimal = analyzedOptimal
+            let finalSafer = analyzedSafer
             await MainActor.run {
-                self.optimalRoute = optimalRoute
-                self.saferRoute = saferRoute
+                self.optimalRoute = finalOptimal
+                self.saferRoute = finalSafer
                 self.lastRouteSource = "mapkit"
                 self.isLoading = false
             }
-            refreshScrapedGoogleMapsETAs(requestID: requestID, start: start, destination: destination)
+            refreshScrapedGoogleMapsETAs(requestID: requestID, start: start, destination: destination, optimalRoute: finalOptimal, saferRoute: finalSafer)
         } catch {
             await MainActor.run {
                 self.errorMessage = error.localizedDescription
@@ -91,71 +106,48 @@ class RouteService: ObservableObject {
     private func refreshScrapedGoogleMapsETAs(
         requestID: UUID,
         start: CLLocationCoordinate2D,
-        destination: CLLocationCoordinate2D
+        destination: CLLocationCoordinate2D,
+        optimalRoute: Route,
+        saferRoute: Route
     ) {
         Task { [weak self] in
             guard let self else { return }
-            await self.refreshSingleGoogleMapsETA(
-                requestID: requestID,
-                routeName: "fastest",
-                routeType: .optimal,
-                route: self.optimalRoute,
-                start: start,
-                destination: destination
-            )
-            await self.refreshSingleGoogleMapsETA(
-                requestID: requestID,
-                routeName: "safer",
-                routeType: .safer,
-                route: self.saferRoute,
-                start: start,
-                destination: destination
-            )
-        }
-    }
+            var namedURLs: [String: String] = [:]
+            if let url = optimalRoute.googleMapsURL(origin: start, destination: destination) {
+                namedURLs["fastest"] = url
+            }
+            if let url = saferRoute.googleMapsURL(origin: start, destination: destination) {
+                namedURLs["safer"] = url
+            }
+            guard !namedURLs.isEmpty else { return }
 
-    private func refreshSingleGoogleMapsETA(
-        requestID: UUID,
-        routeName: String,
-        routeType: Route.RouteType,
-        route: Route?,
-        start: CLLocationCoordinate2D,
-        destination: CLLocationCoordinate2D
-    ) async {
-        guard let route, let url = route.googleMapsURL(origin: start, destination: destination) else {
-            return
-        }
-
-        let eta = await self.fetchSingleScrapedGoogleMapsETA(routeName: routeName, url: url)
-        guard let eta else { return }
-        await MainActor.run {
-            guard self.activeRouteRequestID == requestID else { return }
-            switch routeType {
-            case .optimal:
-                if var updatedOptimal = self.optimalRoute {
-                    updatedOptimal.estimatedTime = eta
-                    self.optimalRoute = updatedOptimal
+            let response = await fetchScrapedGoogleMapsETAs(namedURLs: namedURLs)
+            await MainActor.run {
+                guard self.activeRouteRequestID == requestID else { return }
+                if let eta = response.etasSeconds["fastest"],
+                   var updated = self.optimalRoute {
+                    updated.estimatedTime = eta
+                    self.optimalRoute = updated
                 }
-            case .safer:
-                if var updatedSafer = self.saferRoute {
-                    updatedSafer.estimatedTime = eta
-                    self.saferRoute = updatedSafer
+                if let eta = response.etasSeconds["safer"],
+                   var updated = self.saferRoute {
+                    updated.estimatedTime = eta
+                    self.saferRoute = updated
                 }
             }
         }
     }
 
-    private func fetchSingleScrapedGoogleMapsETA(routeName: String, url: String) async -> TimeInterval? {
+    private func fetchScrapedGoogleMapsETAs(namedURLs: [String: String]) async -> GoogleMapsETAResponse {
         do {
-            let response = try await withTimeout(seconds: 20) {
-                try await self.riskService.fetchGoogleMapsETAs(namedURLs: [routeName: url])
+            let response = try await withTimeout(seconds: 35) {
+                try await self.riskService.fetchGoogleMapsETAs(namedURLs: namedURLs)
             }
-            let eta = response.etasSeconds[routeName]
-            print("[google-eta] applying \(routeName) ETA=\(String(describing: eta)) sources=\(response.sources ?? [:]) failures=\(response.failures)")
-            return eta
+            print("[google-eta] applying ETAs=\(response.etasSeconds) sources=\(response.sources ?? [:]) failures=\(response.failures)")
+            return response
         } catch {
-            print("[google-eta] \(routeName) scrape request failed: \(error.localizedDescription)")
-            return nil
+            print("[google-eta] scrape request failed: \(error.localizedDescription)")
+            return GoogleMapsETAResponse(etasSeconds: [:], failures: [:], sources: nil)
         }
     }
 
@@ -179,19 +171,27 @@ class RouteService: ObservableObject {
     /// fastest route and its ETA.
     private func fetchBackendSaferRoute(
         from start: CLLocationCoordinate2D,
-        to destination: CLLocationCoordinate2D
+        to destination: CLLocationCoordinate2D,
+        weather: WeatherData? = nil,
+        timeOfDay: (hour: Int, isWeekend: Bool)? = nil
     ) async throws -> Route {
         let routeCenter = CLLocationCoordinate2D(
             latitude: (start.latitude + destination.latitude) / 2,
             longitude: (start.longitude + destination.longitude) / 2
         )
-        let weather = await weatherService.getWeatherData(for: routeCenter)
+        let effectiveWeather: WeatherData
+        if let w = weather {
+            effectiveWeather = w
+        } else {
+            effectiveWeather = await weatherService.getWeatherData(for: routeCenter)
+        }
         let beta = currentBeta
 
         let response = try await riskService.fetchSafetyAwareRoutes(
             origin: start,
             destination: destination,
-            weather: weather,
+            weather: effectiveWeather,
+            timeOfDay: timeOfDay,
             beta: beta
         )
 

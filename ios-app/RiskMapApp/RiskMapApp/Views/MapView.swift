@@ -27,7 +27,6 @@ struct MapView: View {
         ZStack {
             Map(position: $cameraPosition, interactionModes: [.pan, .zoom, .rotate, .pitch]) {
                 ForEach(riskService.roadSegments) { segment in
-                    // draw road segments as colored polylines
                     if !segment.coordinates.isEmpty {
                         let coords = segment.coordinates.map { 
                             CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
@@ -79,6 +78,11 @@ struct MapView: View {
             }
             .onAppear {
                 loadRiskData()
+                // Preload full segment list for Road Details tab (runs in background)
+                Task {
+                    guard riskService.allSegmentsForList.isEmpty else { return }
+                    try? await riskService.fetchAllRiskPredictionsForList()
+                }
             }
             .onMapCameraChange(frequency: .onEnd) { context in
                 // load data when map region changes
@@ -143,7 +147,7 @@ struct MapView: View {
     private func loadRiskDataForRegion(_ region: MKCoordinateRegion) {
         Task {
             do {
-                _ = try await riskService.fetchRiskPredictions(for: region)
+                _ = try await riskService.fetchRiskPredictions(for: region, limit: 200)
             } catch {
                 let errorMessage = error.localizedDescription
                 print("Error loading risk data: \(errorMessage)")
@@ -173,6 +177,9 @@ struct RiskMapLegend: View {
                         .foregroundColor(.secondary)
                 }
             }
+            Text("Top 200 highest risk segments highlighted. Zoom in for more.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
         .padding(10)
         .background(Color(.systemBackground).opacity(0.92))

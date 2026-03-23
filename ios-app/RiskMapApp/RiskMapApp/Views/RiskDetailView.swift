@@ -68,7 +68,7 @@ struct RiskDetailView: View {
                         }
                     }
 
-                    // Header: road name + location
+                    // Header: road name + location + risk level + lambda
                     VStack(alignment: .leading, spacing: 8) {
                         Text(segment.linearName)
                             .font(.title)

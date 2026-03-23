@@ -162,6 +162,7 @@ def apply_risk_to_edge_costs(
     lambda_per_hour: Dict[Hashable, float],
     beta_hours_per_expected_crash: float = 0.1,
     default_lam_per_hour: Optional[float] = None,
+    risk_multiplier: float = 1.0,
 ) -> None:
     """
     Annotate edges with expected crashes and combined cost.
@@ -174,6 +175,8 @@ def apply_risk_to_edge_costs(
         default_lam_per_hour: for segments not in lambda_per_hour, use this instead of 0.
             If None, uses 0 (unknown = zero risk). Use median of known λ to avoid
             biasing safer path toward segments with no data.
+        risk_multiplier: scales the risk penalty (e.g. 1.35 for rain). Used so that
+            weather/time conditions change route selection; default 1.0 = no scaling.
 
     Edge attributes added:
         - expected_crashes
@@ -194,6 +197,7 @@ def apply_risk_to_edge_costs(
         else max(default_lam, 1e-12)
     )
     baseline_lam = max(baseline_lam, 1e-12)
+    NORMALIZED_RISK_CAP = 1.5
 
     def _get_lam(seg_id, lam_dict):
         """Look up lambda with type normalization (int/np.int64/float key mismatch)."""
@@ -216,8 +220,11 @@ def apply_risk_to_edge_costs(
         lam = _get_lam(seg_id, lambda_per_hour)
 
         expected_crashes = lam * travel_time  # dimensionless expected count
-        normalized_risk = float(np.log1p(max(lam, 0.0) / baseline_lam))
-        risk_penalty_hours = beta_hours_per_expected_crash * travel_time * normalized_risk
+        raw_normalized = float(np.log1p(max(lam, 0.0) / baseline_lam))
+        normalized_risk = min(raw_normalized, NORMALIZED_RISK_CAP)
+        risk_penalty_hours = (
+            beta_hours_per_expected_crash * travel_time * normalized_risk * risk_multiplier
+        )
         data["expected_crashes"] = expected_crashes
         data["normalized_risk"] = normalized_risk
         data["risk_penalty_hours"] = risk_penalty_hours
