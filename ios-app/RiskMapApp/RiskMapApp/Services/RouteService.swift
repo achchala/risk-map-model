@@ -47,11 +47,11 @@ class RouteService: ObservableObject {
         do {
             // Always use MapKit for the fastest route so displayed "fastest" time matches
             // Apple's ETA. Use backend only for the safer alternative when available.
-            let optimalMKRoute = try await withTimeout(seconds: 30) {
+            let optimalMKRoute = try await withTimeout(seconds: 45) {
                 try await self.calculateOptimalRoute(from: start, to: destination)
             }
 
-            var analyzedOptimal = try await withTimeout(seconds: 20) {
+            var analyzedOptimal = try await withTimeout(seconds: 30) {
                 try await self.analyzeRoute(optimalMKRoute, type: .optimal)
             }
             analyzedOptimal.estimatedTime = nil
@@ -78,10 +78,10 @@ class RouteService: ObservableObject {
             }
 
             // Fallback: MapKit for both (outside Toronto or backend unavailable)
-            let saferMKRoute = try await withTimeout(seconds: 30) {
+            let saferMKRoute = try await withTimeout(seconds: 45) {
                 try await self.calculateSaferRoute(from: start, to: destination, timePenaltyFactor: self.currentTimePenaltyFactor)
             }
-            var analyzedSafer = try await withTimeout(seconds: 20) {
+            var analyzedSafer = try await withTimeout(seconds: 30) {
                 try await self.analyzeRoute(saferMKRoute, type: .safer)
             }
             analyzedSafer.estimatedTime = nil
@@ -511,9 +511,9 @@ enum RouteError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .noRouteFound: return "No route found between the selected locations"
+        case .noRouteFound: return "No route found between the selected locations. Try different start or destination."
         case .locationUnavailable: return "Your location is not available"
-        case .routeCalculationFailed: return "Failed to calculate route"
+        case .routeCalculationFailed: return "Request timed out. Check your connection and try again."
         }
     }
 }

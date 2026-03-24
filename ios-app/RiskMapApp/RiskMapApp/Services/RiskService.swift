@@ -353,7 +353,7 @@ class RiskService: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 25.0
+        request.timeoutInterval = 45.0
         addNgrokBypass(to: &request)
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 

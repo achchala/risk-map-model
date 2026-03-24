@@ -50,8 +50,8 @@ enum SafetySpeedBalance: String, CaseIterable {
     var beta: Double {
         switch self {
         case .speed: return 0.25
-        case .balanced: return 0.75
-        case .safety: return 1.5
+        case .balanced: return 1.5
+        case .safety: return 8.0
         }
     }
 
@@ -64,10 +64,10 @@ enum SafetySpeedBalance: String, CaseIterable {
         }
     }
 
-    /// Interpolate beta from slider value (0...1). Range 0.25 (speed) to 1.5 (safety).
+    /// Interpolate beta from slider value (0...1). Range 0.25 (speed) to 8.0 (safety).
     static func betaFromSlider(_ value: Double) -> Double {
         let v = max(0, min(1, value))
-        return 0.25 + v * 1.25
+        return 0.25 + v * 7.75
     }
 
     /// Interpolate time penalty from slider value (0...1)

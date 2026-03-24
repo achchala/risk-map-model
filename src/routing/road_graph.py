@@ -163,44 +163,28 @@ def apply_risk_to_edge_costs(
     beta_hours_per_expected_crash: float = 0.1,
     default_lam_per_hour: Optional[float] = None,
     risk_multiplier: float = 1.0,
+    lambda_p70: Optional[float] = None,
+    lambda_p90: Optional[float] = None,
 ) -> None:
     """
     Annotate edges with expected crashes and combined cost.
-
-    Parameters:
-        G: graph with 'segment_id' and 'travel_time_hours' on each edge
-        lambda_per_hour: mapping from segment_id to crash rate λ (crashes/hour)
-        beta_hours_per_expected_crash: risk-avoidance coefficient. Higher values
-            penalize high-λ segments more strongly in the combined weight.
-        default_lam_per_hour: for segments not in lambda_per_hour, use this instead of 0.
-            If None, uses 0 (unknown = zero risk). Use median of known λ to avoid
-            biasing safer path toward segments with no data.
-        risk_multiplier: scales the risk penalty (e.g. 1.35 for rain). Used so that
-            weather/time conditions change route selection; default 1.0 = no scaling.
-
-    Edge attributes added:
-        - expected_crashes
-        - normalized_risk
-        - risk_penalty_hours
-        - risk_weight_hours
+    Uses percentile-based risk (when p70/p90 provided) for strong route differentiation.
     """
     default_lam = float(default_lam_per_hour) if default_lam_per_hour is not None else 0.0
     positive_lams = np.array(
         [float(v) for v in lambda_per_hour.values() if float(v) > 0.0],
         dtype=float,
     )
-    # Use a typical non-zero λ as the network baseline so routing reacts to
-    # relative risk, not just raw λ magnitudes (which are very small in practice).
     baseline_lam = (
         float(np.median(positive_lams))
         if positive_lams.size > 0
         else max(default_lam, 1e-12)
     )
     baseline_lam = max(baseline_lam, 1e-12)
-    NORMALIZED_RISK_CAP = 1.5
+    p70 = float(lambda_p70) if lambda_p70 is not None and lambda_p70 > 0 else None
+    p90 = float(lambda_p90) if lambda_p90 is not None and lambda_p90 > 0 else None
 
     def _get_lam(seg_id, lam_dict):
-        """Look up lambda with type normalization (int/np.int64/float key mismatch)."""
         if seg_id is None:
             return default_lam
         v = lam_dict.get(seg_id, None)
@@ -214,14 +198,23 @@ def apply_risk_to_edge_costs(
             pass
         return default_lam
 
+    def _normalized_risk(lam: float) -> float:
+        if p70 is not None and p90 is not None and p90 > p70:
+            if lam >= p90:
+                return 6.0
+            if lam >= p70:
+                return 3.0
+            return 0.5
+        raw = float(np.log1p(max(lam, 0.0) / baseline_lam))
+        return min(max(0, raw), 5.0)
+
     for u, v, data in G.edges(data=True):
         seg_id = data.get("segment_id")
         travel_time = float(data.get("travel_time_hours", 0.0))
         lam = _get_lam(seg_id, lambda_per_hour)
 
-        expected_crashes = lam * travel_time  # dimensionless expected count
-        raw_normalized = float(np.log1p(max(lam, 0.0) / baseline_lam))
-        normalized_risk = min(raw_normalized, NORMALIZED_RISK_CAP)
+        expected_crashes = lam * travel_time
+        normalized_risk = _normalized_risk(lam)
         risk_penalty_hours = (
             beta_hours_per_expected_crash * travel_time * normalized_risk * risk_multiplier
         )

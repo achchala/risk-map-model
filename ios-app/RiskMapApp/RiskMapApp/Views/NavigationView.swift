@@ -584,8 +584,16 @@ struct RouteNavigationView: View {
 
     private func exportToGoogleMaps(route: Route) {
         guard let start = startCoordinate, let dest = destinationCoordinate else { return }
-        if let encoded = route.googleMapsURL(origin: start, destination: dest), let u = URL(string: encoded) {
-            UIApplication.shared.open(u)
+        guard let encoded = route.googleMapsURL(origin: start, destination: dest), let u = URL(string: encoded) else { return }
+        UIApplication.shared.open(u) { success in
+            // Launch Services can fail with -54 "process may not map database" (Simulator/timing).
+            // Failure is non-fatal; user can retry or copy the URL manually.
+            if !success {
+                UIPasteboard.general.string = encoded
+                #if DEBUG
+                print("[exportToGoogleMaps] open failed (Launch Services -54 possible); URL copied to clipboard")
+                #endif
+            }
         }
     }
 

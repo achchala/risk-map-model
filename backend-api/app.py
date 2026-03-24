@@ -136,10 +136,6 @@ latest_window_start = None
 # Percentile thresholds for mapping λ → risk_label (computed when lambda map is built)
 _lambda_p70 = None
 _lambda_p90 = None
-# Cache for apply_risk: skip recompute when (beta, combined_mult) unchanged
-_route_last_beta: Optional[float] = None
-_route_last_combined_mult: Optional[float] = None
-
 try:
     data_dir = PROJECT_ROOT / "data"
     cache_dir = PROJECT_ROOT / "outputs" / "cache"
@@ -845,21 +841,23 @@ def get_risk_predictions():
 def _route_risk_multipliers(weather_data, time_data):
     """
     Return (weather_mult, time_mult) for route risk adjustment.
-    Each is >= 0; 1.0 means no change. Used when app sends live weather/time for safety-aware routing.
+    Higher values = routes avoid risk more; 1.0 = no change.
     """
     weather_mult = 1.0
     if weather_data and isinstance(weather_data, dict):
         cond = (weather_data.get("condition") or "clear").lower()
         if cond in ("rain", "heavy_rain"):
-            weather_mult = 1.35
+            weather_mult = 1.8
         elif cond in ("snow", "heavy_snow"):
-            weather_mult = 1.5
+            weather_mult = 2.2
         elif cond in ("fog", "mist"):
-            weather_mult = 1.2
+            weather_mult = 1.6
         elif cond == "thunderstorm":
-            weather_mult = 1.5
+            weather_mult = 2.2
         elif cond == "sleet":
-            weather_mult = 1.4
+            weather_mult = 2.0
+        elif cond == "cloudy":
+            weather_mult = 1.2
     time_mult = 1.0
     if time_data and isinstance(time_data, dict):
         hour = time_data.get("hour")
@@ -867,9 +865,9 @@ def _route_risk_multipliers(weather_data, time_data):
             try:
                 h = int(hour)
                 if h >= 23 or h < 5:
-                    time_mult = 1.3
+                    time_mult = 1.6
                 elif (7 <= h <= 9) or (17 <= h <= 19):
-                    time_mult = 1.25 if not time_data.get("is_weekend") else 1.1
+                    time_mult = 1.5 if not time_data.get("is_weekend") else 1.25
             except (TypeError, ValueError):
                 pass
     return (weather_mult, time_mult)
@@ -1078,7 +1076,7 @@ def get_safety_aware_route():
         weather_data = data.get("weather")
         time_data = data.get("time_of_day")
         weather_mult, time_mult = _route_risk_multipliers(weather_data, time_data)
-        combined_mult = min(weather_mult * time_mult, 1.5)
+        combined_mult = min(weather_mult * time_mult, 3.5)
         app.logger.info(
             "[safety-aware] weather=%s time=%s -> weather_mult=%.2f time_mult=%.2f combined_mult=%.2f beta=%.2f",
             weather_data,
@@ -1097,27 +1095,23 @@ def get_safety_aware_route():
         if lambda_per_hour_latest is None:
             _compute_lambda_map_for_latest_window()
 
-        # Apply λ to edges with weather/time risk multiplier so route changes by conditions.
-        # Skip if (beta, combined_mult) unchanged from last request.
-        global _route_last_beta, _route_last_combined_mult
-        reapplied = _route_last_beta != beta or _route_last_combined_mult != combined_mult
-        if reapplied:
-            lam_values = list(lambda_per_hour_latest.values()) if lambda_per_hour_latest else []
-            default_lam = float(np.median(lam_values)) if lam_values else 0.0
-            apply_risk_to_edge_costs(
-                road_graph,
-                lambda_per_hour_latest,
-                beta_hours_per_expected_crash=beta,
-                default_lam_per_hour=default_lam,
-                risk_multiplier=combined_mult,
-            )  # type: ignore[arg-type]
-            _route_last_beta = beta
-            _route_last_combined_mult = combined_mult
+        # Apply λ to edges with weather/time/beta so routing responds to all three.
+        global _lambda_p70, _lambda_p90
+        lam_values = list(lambda_per_hour_latest.values()) if lambda_per_hour_latest else []
+        default_lam = float(np.median(lam_values)) if lam_values else 0.0
+        apply_risk_to_edge_costs(
+            road_graph,
+            lambda_per_hour_latest,
+            beta_hours_per_expected_crash=beta,
+            default_lam_per_hour=default_lam,
+            risk_multiplier=combined_mult,
+            lambda_p70=_lambda_p70,
+            lambda_p90=_lambda_p90,
+        )  # type: ignore[arg-type]
         app.logger.info(
-            "[safety-aware] graph_apply=%s (last_beta=%s last_mult=%s)",
-            "reapplied" if reapplied else "cached",
-            _route_last_beta,
-            _route_last_combined_mult,
+            "[safety-aware] graph_apply beta=%.2f combined_mult=%.2f",
+            beta,
+            combined_mult,
         )
 
         # Snap origin/destination to nearest graph nodes
