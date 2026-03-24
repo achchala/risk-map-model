@@ -2,23 +2,61 @@
 //  RiskListView.swift
 //  RiskMapApp
 //
-//  list view showing high-risk roads
+//  list view showing road segments with risk filtering
 //
 
 import SwiftUI
 
+enum RiskFilter: String, CaseIterable {
+    case all = "All"
+    case low = "Low Risk"
+    case medium = "Medium Risk"
+    case high = "High Risk"
+    
+    var riskLevel: RiskLevel? {
+        switch self {
+        case .all: return nil
+        case .low: return .low
+        case .medium: return .medium
+        case .high: return .high
+        }
+    }
+}
+
 struct RiskListView: View {
     @EnvironmentObject var riskService: RiskService
     @State private var searchText = ""
+    @State private var riskFilter: RiskFilter = .all
     
-    var highRiskRoads: [RoadSegment] {
-        riskService.getHighRiskRoads()
+    /// Segments for list: prefer full load (allSegmentsForList), fall back to map data.
+    var allRoads: [RoadSegment] {
+        !riskService.allSegmentsForList.isEmpty
+            ? riskService.allSegmentsForList
+            : riskService.roadSegments
+    }
+    
+    var riskFilteredRoads: [RoadSegment] {
+        let roads: [RoadSegment]
+        if let level = riskFilter.riskLevel {
+            roads = allRoads.filter { $0.riskLevel == level }
+        } else {
+            roads = allRoads
+        }
+        // Sort: high first, then medium, then low; within each group by name
+        let priority: [RiskLevel: Int] = [.high: 0, .medium: 1, .low: 2]
+        return roads.sorted { a, b in
+            let pa = priority[a.riskLevel] ?? 3
+            let pb = priority[b.riskLevel] ?? 3
+            if pa != pb { return pa < pb }
+            return a.linearName.localizedCaseInsensitiveCompare(b.linearName) == .orderedAscending
+        }
     }
     
     var filteredRoads: [RoadSegment] {
+        let roads = riskFilteredRoads
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else { return highRiskRoads }
-        return highRiskRoads.filter { segment in
+        guard !query.isEmpty else { return roads }
+        return roads.filter { segment in
             segment.linearName.lowercased().contains(query)
                 || (segment.segmentLocation?.lowercased().contains(query) ?? false)
         }
@@ -27,15 +65,23 @@ struct RiskListView: View {
     var body: some View {
         NavigationView {
             List {
+                Section {
+                    Picker("Filter by risk", selection: $riskFilter) {
+                        ForEach(RiskFilter.allCases, id: \.self) { filter in
+                            Text(filter.rawValue).tag(filter)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
                 if filteredRoads.isEmpty {
                     VStack(spacing: 16) {
                         Image(systemName: searchText.isEmpty ? "map" : "magnifyingglass")
                             .font(.system(size: 50))
                             .foregroundColor(.secondary)
-                        Text(searchText.isEmpty ? "No high-risk roads found" : "No matches for \"\(searchText)\"")
+                        Text(emptyStateTitle)
                             .font(.headline)
                             .foregroundColor(.secondary)
-                        Text(searchText.isEmpty ? "Load the map to see risk predictions" : "Try a different search term")
+                        Text(emptyStateSubtitle)
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -49,12 +95,38 @@ struct RiskListView: View {
                     }
                 }
             }
-            .navigationTitle("High Risk Roads")
+            .navigationTitle("Road Details")
             .searchable(text: $searchText, prompt: "Search road names")
             .refreshable {
-                // refresh data if needed
+                try? await riskService.fetchAllRiskPredictionsForList()
+            }
+            .onAppear {
+                Task {
+                    guard riskService.allSegmentsForList.isEmpty else { return }
+                    try? await riskService.fetchAllRiskPredictionsForList()
+                }
             }
         }
+        .overlay {
+            if riskService.isLoadingList {
+                ProgressView("Loading all road segments...")
+                    .tint(.primary)
+                    .padding()
+                    .background(.regularMaterial)
+                    .cornerRadius(10)
+            }
+        }
+    }
+    
+    private var emptyStateTitle: String {
+        if !searchText.isEmpty { return "No matches for \"\(searchText)\"" }
+        if riskFilter != .all { return "No \(riskFilter.rawValue) segments" }
+        return "No road segments found"
+    }
+    
+    private var emptyStateSubtitle: String {
+        if !searchText.isEmpty { return "Try a different search term" }
+        return "Load the map to see risk predictions"
     }
 }
 

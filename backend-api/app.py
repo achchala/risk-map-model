@@ -6,6 +6,7 @@ serves risk predictions from the trained model
 # Reduce chance of double-free in numpy/OpenBLAS/MKL (set before any numeric imports)
 import os
 import atexit
+import multiprocessing
 import threading
 import time
 
@@ -37,7 +38,9 @@ from shapely.geometry import Point, box
 
 # import existing modules
 PROJECT_ROOT = Path(__file__).parent.parent
+BACKEND_DIR = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(BACKEND_DIR))
 
 # model & pipeline imports
 from src.models.model_trainer import TemporalCountModelTrainer, HurdleTemporalTrainer  # type: ignore
@@ -133,10 +136,6 @@ latest_window_start = None
 # Percentile thresholds for mapping λ → risk_label (computed when lambda map is built)
 _lambda_p70 = None
 _lambda_p90 = None
-# Cache for apply_risk: skip recompute when (beta, combined_mult) unchanged
-_route_last_beta: Optional[float] = None
-_route_last_combined_mult: Optional[float] = None
-
 try:
     data_dir = PROJECT_ROOT / "data"
     cache_dir = PROJECT_ROOT / "outputs" / "cache"
@@ -712,11 +711,22 @@ def get_risk_predictions():
         return jsonify({"error": "Panel data not loaded"}), 500
 
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         north = data.get("north")
         south = data.get("south")
         east = data.get("east")
         west = data.get("west")
+        limit = data.get("limit")
+        lite = data.get("lite", False)
+        prioritize_risk = data.get("prioritize_risk", True)
+        include_total = data.get("include_total", False)
+
+        # Segment cap: default 200 for map display; higher for Road Details list
+        if limit is not None:
+            cap = int(limit) if isinstance(limit, (int, float)) else 200
+            cap = min(max(1, cap), 10000)
+        else:
+            cap = 200
 
         if lambda_per_hour_latest is None:
             _compute_lambda_map_for_latest_window()
@@ -735,15 +745,22 @@ def get_risk_predictions():
             _get_risk_for_row, axis=1
         )
 
-        # Cap at 200 segments to avoid MapKit Metal buffer overflow (~50k resource limit)
-        if len(segments_in_bbox) > 200:
-            risk_priority = {"high": 3, "medium": 2, "low": 1}
-            segments_in_bbox["_risk_priority"] = segments_in_bbox["risk_label"].map(
-                risk_priority
-            )
-            segments_in_bbox = segments_in_bbox.sort_values(
-                "_risk_priority", ascending=False
-            ).head(200)
+        total_in_bbox = len(segments_in_bbox)
+
+        # Cap segments (200 default for map; higher for Road Details list)
+        if len(segments_in_bbox) > cap:
+            if prioritize_risk:
+                # Map: prioritize high-risk segments
+                risk_priority = {"high": 3, "medium": 2, "low": 1}
+                segments_in_bbox["_risk_priority"] = segments_in_bbox["risk_label"].map(
+                    risk_priority
+                )
+                segments_in_bbox = segments_in_bbox.sort_values(
+                    "_risk_priority", ascending=False
+                ).head(cap)
+            else:
+                # Road Details list: geographic mix (low/medium/high) for filter to work
+                segments_in_bbox = segments_in_bbox.head(cap)
 
         results = []
         p70 = _lambda_p70 or 0.0
@@ -774,14 +791,20 @@ def get_risk_predictions():
                 confidence = max(float(prob_crash), 0.5)
             confidence = float(np.clip(confidence, 0.01, 1.0))
 
-            drivers = _get_risk_driver_features_for_segment(seg_id)
-            risk_explanation = _build_risk_explanation(
-                drivers,
-                risk_label,
-                num_total_crashes=_safe_int(segment.get("num_total_crashes")),
-                num_ksi_crashes=_safe_int(segment.get("num_ksi_crashes")),
-                fatality_count=_safe_int(segment.get("fatality_count")),
-            )
+            if lite:
+                drivers = {}
+                risk_explanation = None
+                coord_limit = 10
+            else:
+                drivers = _get_risk_driver_features_for_segment(seg_id)
+                risk_explanation = _build_risk_explanation(
+                    drivers,
+                    risk_label,
+                    num_total_crashes=_safe_int(segment.get("num_total_crashes")),
+                    num_ksi_crashes=_safe_int(segment.get("num_ksi_crashes")),
+                    fatality_count=_safe_int(segment.get("fatality_count")),
+                )
+                coord_limit = 50
 
             segment_location = _get_segment_location_description(segment)
             result = {
@@ -795,13 +818,16 @@ def get_risk_predictions():
                 "num_total_crashes": int(segment.get("num_total_crashes", 0)),
                 "num_ksi_crashes": int(segment.get("num_ksi_crashes", 0)),
                 "fatality_count": int(segment.get("fatality_count", 0)),
-                "coordinates": coords[:50],
+                "coordinates": coords[:coord_limit],
                 "riskDrivers": drivers,
                 "risk_explanation": risk_explanation,
+                "lambda_per_hour": float(lam),
             }
             results.append(result)
 
         logging.info(f"Returning {len(results)} segments for bbox")
+        if include_total:
+            return jsonify({"segments": results, "total_in_bbox": total_in_bbox})
         return jsonify(results)
 
     except Exception as e:
@@ -815,21 +841,23 @@ def get_risk_predictions():
 def _route_risk_multipliers(weather_data, time_data):
     """
     Return (weather_mult, time_mult) for route risk adjustment.
-    Each is >= 0; 1.0 means no change. Used when app sends live weather/time for safety-aware routing.
+    Higher values = routes avoid risk more; 1.0 = no change.
     """
     weather_mult = 1.0
     if weather_data and isinstance(weather_data, dict):
         cond = (weather_data.get("condition") or "clear").lower()
         if cond in ("rain", "heavy_rain"):
-            weather_mult = 1.35
+            weather_mult = 1.8
         elif cond in ("snow", "heavy_snow"):
-            weather_mult = 1.5
+            weather_mult = 2.2
         elif cond in ("fog", "mist"):
-            weather_mult = 1.2
+            weather_mult = 1.6
         elif cond == "thunderstorm":
-            weather_mult = 1.5
+            weather_mult = 2.2
         elif cond == "sleet":
-            weather_mult = 1.4
+            weather_mult = 2.0
+        elif cond == "cloudy":
+            weather_mult = 1.2
     time_mult = 1.0
     if time_data and isinstance(time_data, dict):
         hour = time_data.get("hour")
@@ -837,9 +865,9 @@ def _route_risk_multipliers(weather_data, time_data):
             try:
                 h = int(hour)
                 if h >= 23 or h < 5:
-                    time_mult = 1.3
+                    time_mult = 1.6
                 elif (7 <= h <= 9) or (17 <= h <= 19):
-                    time_mult = 1.25 if not time_data.get("is_weekend") else 1.1
+                    time_mult = 1.5 if not time_data.get("is_weekend") else 1.25
             except (TypeError, ValueError):
                 pass
     return (weather_mult, time_mult)
@@ -1048,7 +1076,16 @@ def get_safety_aware_route():
         weather_data = data.get("weather")
         time_data = data.get("time_of_day")
         weather_mult, time_mult = _route_risk_multipliers(weather_data, time_data)
-        combined_mult = weather_mult * time_mult
+        combined_mult = min(weather_mult * time_mult, 3.5)
+        app.logger.info(
+            "[safety-aware] weather=%s time=%s -> weather_mult=%.2f time_mult=%.2f combined_mult=%.2f beta=%.2f",
+            weather_data,
+            time_data,
+            weather_mult,
+            time_mult,
+            combined_mult,
+            beta,
+        )
 
         origin_point = Point(o_lon, o_lat)
         dest_point = Point(d_lon, d_lat)
@@ -1058,26 +1095,24 @@ def get_safety_aware_route():
         if lambda_per_hour_latest is None:
             _compute_lambda_map_for_latest_window()
 
-        # Optionally adjust λ by current weather/time so safer route reflects conditions
-        lam_for_routing = lambda_per_hour_latest
-        if combined_mult != 1.0 and lambda_per_hour_latest:
-            lam_for_routing = {
-                k: v * combined_mult for k, v in lambda_per_hour_latest.items()
-            }
-
-        # Apply λ to edges. Skip if (beta, combined_mult) unchanged from last request.
-        global _route_last_beta, _route_last_combined_mult
-        if _route_last_beta != beta or _route_last_combined_mult != combined_mult:
-            lam_values = list(lam_for_routing.values()) if lam_for_routing else []
-            default_lam = float(np.median(lam_values)) if lam_values else 0.0
-            apply_risk_to_edge_costs(
-                road_graph,
-                lam_for_routing,
-                beta_hours_per_expected_crash=beta,
-                default_lam_per_hour=default_lam,
-            )  # type: ignore[arg-type]
-            _route_last_beta = beta
-            _route_last_combined_mult = combined_mult
+        # Apply λ to edges with weather/time/beta so routing responds to all three.
+        global _lambda_p70, _lambda_p90
+        lam_values = list(lambda_per_hour_latest.values()) if lambda_per_hour_latest else []
+        default_lam = float(np.median(lam_values)) if lam_values else 0.0
+        apply_risk_to_edge_costs(
+            road_graph,
+            lambda_per_hour_latest,
+            beta_hours_per_expected_crash=beta,
+            default_lam_per_hour=default_lam,
+            risk_multiplier=combined_mult,
+            lambda_p70=_lambda_p70,
+            lambda_p90=_lambda_p90,
+        )  # type: ignore[arg-type]
+        app.logger.info(
+            "[safety-aware] graph_apply beta=%.2f combined_mult=%.2f",
+            beta,
+            combined_mult,
+        )
 
         # Snap origin/destination to nearest graph nodes
         try:
@@ -1089,6 +1124,7 @@ def get_safety_aware_route():
                     {
                         "error": str(e),
                         "hint": "Origin and destination must be within 300m of the road network (Toronto centreline).",
+                        "code": "OUT_OF_BOUNDS",
                     }
                 ),
                 400,
@@ -1162,6 +1198,14 @@ def get_safety_aware_route():
         safer_segments_list = _build_segment_list(safer_edges)
         fastest_high, fastest_medium, fastest_low = _count_risk_labels(fastest_segments_list)
         safer_high, safer_medium, safer_low = _count_risk_labels(safer_segments_list)
+        app.logger.info(
+            "[safety-aware] safer: high=%d med=%d low=%d time_h=%.3f (combined_mult=%.2f)",
+            safer_high,
+            safer_medium,
+            safer_low,
+            safer_summary.get("total_travel_time_hours", 0),
+            combined_mult,
+        )
 
         # Build risk driver explanations for avoided segments with geometry and labels
         avoided_details = []
@@ -1367,26 +1411,39 @@ def get_lambda_stats():
 
 
 def _google_duration_text_to_seconds(text: str) -> Optional[float]:
+    """Parse Google Maps duration text to seconds. Handles formats like:
+    '45 min', '2 hr', '2 hr 15 min', '1 day 8 hr', '1 d 8 h 30 min'.
+    Previously ignored 'day'/'d', causing '1 day 8 hr' to be parsed as 8 hr."""
     normalized = (
         str(text)
         .lower()
+        .replace("days", "d")
+        .replace("day", "d")
         .replace("hours", "hr")
         .replace("hour", "hr")
+        .replace(" h ", " hr ")  # "8 h" in "1 d 8 h" -> "8 hr"
+        .replace(" h,", " hr,")
+        .replace(" h.", " hr.")
+        .replace(" h", " hr")  # trailing "8 h" -> "8 hr"
         .replace("minutes", "min")
         .replace("minute", "min")
         .strip()
     )
     if not normalized:
         return None
+    days = 0
     hours = 0
     minutes = 0
+    day_match = re.search(r"(\d+)\s*d\b", normalized)
     hr_match = re.search(r"(\d+)\s*hr", normalized)
     min_match = re.search(r"(\d+)\s*min", normalized)
+    if day_match:
+        days = int(day_match.group(1))
     if hr_match:
         hours = int(hr_match.group(1))
     if min_match:
         minutes = int(min_match.group(1))
-    total_seconds = float(hours * 3600 + minutes * 60)
+    total_seconds = float(days * 86400 + hours * 3600 + minutes * 60)
     return total_seconds if total_seconds > 0 else None
 
 
@@ -1398,185 +1455,50 @@ def _format_duration_seconds(seconds: float) -> str:
     return f"{minutes}m"
 
 
-_google_playwright = None
-_google_browser = None
-_google_timeout_error = None
 _google_scrape_lock = threading.Lock()
-_GOOGLE_DURATION_RE = re.compile(r"^(?:(?:\d+\s*hr\s*)?\d+\s*min|\d+\s*hr)$", re.IGNORECASE)
+# Allow optional day(s)/d prefix so "1 day 8 hr" and "1 d 8 h" are valid candidates
+_GOOGLE_DURATION_RE = re.compile(
+    r"^(?:(?:\d+\s*(?:day|days|d)\s+)?)?(?:(?:\d+\s*hr\s*)?\d+\s*min|\d+\s*hr|\d+\s*h)$",
+    re.IGNORECASE,
+)
+
+_google_eta_pool = None
+_google_eta_pool_lock = threading.Lock()
 
 
-def _shutdown_google_browser():
-    global _google_browser, _google_playwright
-    if _google_browser is not None:
-        try:
-            _google_browser.close()
-        except Exception:
-            pass
-        _google_browser = None
-    if _google_playwright is not None:
-        try:
-            _google_playwright.stop()
-        except Exception:
-            pass
-        _google_playwright = None
+def _get_google_eta_pool():
+    """Lazily create a process pool for Playwright (avoids asyncio conflict)."""
+    global _google_eta_pool
+    with _google_eta_pool_lock:
+        if _google_eta_pool is None:
+            try:
+                import google_eta_worker
+                _google_eta_pool = multiprocessing.Pool(
+                    processes=1,
+                    initializer=google_eta_worker._worker_init,
+                    initargs=(),
+                )
+                logging.info("[google-eta] Process pool started")
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Missing dependency: playwright. Install with `pip install playwright` and `playwright install chromium`."
+                ) from exc
+        return _google_eta_pool
 
 
-def _ensure_google_browser():
-    global _google_browser, _google_playwright, _google_timeout_error
-    if _google_browser is not None and _google_playwright is not None and _google_timeout_error is not None:
-        return _google_browser, _google_timeout_error
-
-    try:
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise RuntimeError(
-            "Missing dependency: playwright. Install with `pip install playwright` and `playwright install chromium`."
-        ) from exc
-
-    _google_playwright = sync_playwright().start()
-    _google_browser = _google_playwright.chromium.launch(
-        headless=True,
-        args=["--disable-dev-shm-usage"],
-    )
-    _google_timeout_error = PlaywrightTimeoutError
-    logging.info("[google-eta] Browser launched")
-    return _google_browser, _google_timeout_error
+def _shutdown_google_eta_pool():
+    global _google_eta_pool
+    with _google_eta_pool_lock:
+        if _google_eta_pool is not None:
+            try:
+                _google_eta_pool.close()
+                _google_eta_pool.join()
+            except Exception:
+                pass
+            _google_eta_pool = None
 
 
-atexit.register(_shutdown_google_browser)
-
-
-def _block_heavy_google_resources(route):
-    request = route.request
-    if request.resource_type in {"image", "media", "font"}:
-        route.abort()
-        return
-    route.continue_()
-
-
-def _scrape_google_candidates(page):
-    return page.evaluate(
-        """
-        () => {
-          const durationRe = /^(?:(?:\\d+\\s*hr\\s*)?\\d+\\s*min|\\d+\\s*hr)$/i;
-          const nodes = [];
-          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-
-          while (walker.nextNode()) {
-            const textNode = walker.currentNode;
-            const text = (textNode.textContent || "").replace(/\\s+/g, " ").trim();
-            if (!durationRe.test(text)) continue;
-
-            const parent = textNode.parentElement;
-            if (!parent) continue;
-
-            const style = window.getComputedStyle(parent);
-            if (style.visibility === "hidden" || style.display === "none") continue;
-
-            const rect = parent.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) continue;
-
-            nodes.push({
-              text,
-              x: rect.x,
-              y: rect.y,
-              width: rect.width,
-              height: rect.height,
-              tag: parent.tagName,
-              ariaLabel: parent.getAttribute("aria-label") || "",
-            });
-          }
-
-          const deduped = [];
-          const seen = new Set();
-          for (const node of nodes) {
-            const key = `${node.text}|${Math.round(node.x)}|${Math.round(node.y)}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            deduped.push(node);
-          }
-
-          deduped.sort((a, b) => {
-            if (Math.abs(a.y - b.y) > 12) return a.y - b.y;
-            return a.x - b.x;
-          });
-
-          return deduped;
-        }
-        """
-    )
-
-
-def _pick_best_google_candidate(candidates):
-    enriched = []
-    for item in candidates or []:
-        text = str(item.get("text", "")).strip()
-        if not _GOOGLE_DURATION_RE.match(text):
-            continue
-        minutes = 0
-        hr_match = re.search(r"(\d+)\s*hr", text.lower())
-        min_match = re.search(r"(\d+)\s*min", text.lower())
-        if hr_match:
-            minutes += int(hr_match.group(1)) * 60
-        if min_match:
-            minutes += int(min_match.group(1))
-        enriched.append({**item, "minutes": minutes})
-
-    if not enriched:
-        return None
-
-    directions_panel = [c for c in enriched if c["x"] < 700 and c["y"] < 900]
-    return directions_panel[0] if directions_panel else enriched[0]
-
-
-def _scrape_google_maps_eta_with_page(page, url: str, timeout_seconds: int = 10, label: str = "route") -> dict:
-    logging.info("[google-eta] START %s scrape", label)
-    try:
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(700)
-    except _google_timeout_error:
-        logging.warning("[google-eta] FAIL %s scrape: timed out waiting for page", label)
-        raise RuntimeError("Timed out waiting for Google Maps to load")
-
-    candidates = []
-    deadline = time.monotonic() + min(float(timeout_seconds), 4.0)
-    while time.monotonic() < deadline:
-        candidates = _scrape_google_candidates(page)
-        if candidates:
-            break
-        page.wait_for_timeout(250)
-
-    best_guess = _pick_best_google_candidate(candidates)
-    seconds = None
-    if best_guess and best_guess.get("minutes") is not None:
-        parsed_seconds = float(best_guess["minutes"]) * 60.0
-        if parsed_seconds > 0:
-            seconds = parsed_seconds
-    if seconds is None:
-        seconds = _google_duration_text_to_seconds((best_guess or {}).get("text", ""))
-
-    if seconds is None:
-        logging.warning(
-            "[google-eta] FAIL %s scrape: no ETA found (candidate_count=%s)",
-            label,
-            len(candidates),
-        )
-        raise RuntimeError("No ETA found in Google Maps page")
-
-    logging.info(
-        "[google-eta] SUCCESS %s scrape: %s from '%s' (candidates=%s)",
-        label,
-        _format_duration_seconds(seconds),
-        best_guess.get("text", "") if best_guess else "",
-        len(candidates),
-    )
-    return {
-        "seconds": seconds,
-        "best_guess": best_guess,
-        "candidate_count": len(candidates),
-        "url": url,
-    }
+atexit.register(_shutdown_google_eta_pool)
 
 
 @app.route("/api/debug/google-maps-eta", methods=["POST"])
@@ -1605,39 +1527,31 @@ def debug_google_maps_eta():
         valid_items.append((name, url.strip()))
 
     with _google_scrape_lock:
-        context = None
-        page = None
         try:
-            browser, _ = _ensure_google_browser()
-            context = browser.new_context(viewport={"width": 1440, "height": 1200})
-            context.route("**/*", _block_heavy_google_resources)
-            page = context.new_page()
-            page.set_default_timeout(10000)
+            pool = _get_google_eta_pool()
+            from google_eta_worker import worker_scrape_one
 
             for name, url in valid_items:
                 try:
-                    scraped = _scrape_google_maps_eta_with_page(page, url, 10, name)
-                    etas_seconds[name] = float(scraped["seconds"])
-                    sources[name] = "google"
-                    details[name] = {
-                        "best_guess": scraped["best_guess"],
-                        "candidate_count": scraped["candidate_count"],
-                        "url": scraped["url"],
-                    }
+                    _, result, err = pool.apply(worker_scrape_one, (name, url, 10))
+                    if err:
+                        failures[name] = err
+                        logging.warning("[google-eta] FAIL %s scrape: %s", name, err)
+                    elif result:
+                        etas_seconds[name] = float(result["seconds"])
+                        sources[name] = "google"
+                        details[name] = {
+                            "best_guess": result.get("best_guess"),
+                            "candidate_count": result.get("candidate_count"),
+                            "url": result.get("url"),
+                        }
                 except Exception as exc:
                     failures[name] = str(exc)
                     logging.warning("[google-eta] FAIL %s scrape: %s", name, exc)
-        finally:
-            try:
-                if page is not None:
-                    page.close()
-            except Exception:
-                pass
-            try:
-                if context is not None:
-                    context.close()
-            except Exception:
-                pass
+        except Exception as outer:
+            logging.exception("[google-eta] Pool/scrape error")
+            if not failures:
+                return jsonify({"error": str(outer)}), 500
 
     logging.info(
         "[google-eta] RESPONSE etas=%s failures=%s sources=%s",
@@ -1666,8 +1580,8 @@ def get_risk_definition():
         "p70": float(_lambda_p70),
         "p90": float(_lambda_p90),
         "description": (
-            "Risk is based on predicted crash rate (λ) per segment. "
-            "Low = bottom 70% of segments, Medium = 70th–90th percentile, High = top 10%."
+            "Risk is based on predicted crash rate (λ) per road segment. "
+            "Each segment is ranked by its predicted crash likelihood."
         ),
         "low": "Bottom 70% of segments by predicted crash rate",
         "medium": "70th–90th percentile",

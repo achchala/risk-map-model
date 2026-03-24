@@ -28,7 +28,7 @@ struct ContentView: View {
 
             RiskListView()
                 .tabItem {
-                    Label("High Risk", systemImage: "exclamationmark.triangle")
+                    Label("Road Details", systemImage: "list.bullet.rectangle")
                 }
                 .tag(2)
 

@@ -10,6 +10,136 @@ import MapKit
 import CoreLocation
 import UIKit
 
+// MARK: - Route condition options (match backend algorithm)
+enum RouteWeatherOption: String, CaseIterable {
+    case live = "Live"
+    case clear = "Clear"
+    case cloudy = "Cloudy"
+    case rain = "Rain"
+    case heavyRain = "Heavy Rain"
+    case snow = "Snow"
+    case heavySnow = "Heavy Snow"
+    case fog = "Fog"
+    case mist = "Mist"
+    case thunderstorm = "Thunderstorm"
+    case sleet = "Sleet"
+
+    var backendCondition: String {
+        switch self {
+        case .live: return "clear"
+        case .clear: return "clear"
+        case .cloudy: return "cloudy"
+        case .rain: return "rain"
+        case .heavyRain: return "heavy_rain"
+        case .snow: return "snow"
+        case .heavySnow: return "heavy_snow"
+        case .fog: return "fog"
+        case .mist: return "mist"
+        case .thunderstorm: return "thunderstorm"
+        case .sleet: return "sleet"
+        }
+    }
+
+    func toWeatherData() -> WeatherData? {
+        guard self != .live else { return nil }
+        let cond: WeatherData.WeatherCondition
+        switch self {
+        case .live: return nil
+        case .clear: cond = .clear
+        case .cloudy: cond = .cloudy
+        case .rain: cond = .rain
+        case .heavyRain: cond = .heavyRain
+        case .snow: cond = .snow
+        case .heavySnow: cond = .heavySnow
+        case .fog: cond = .fog
+        case .mist: cond = .mist
+        case .thunderstorm: cond = .thunderstorm
+        case .sleet: cond = .sleet
+        }
+        return WeatherData(condition: cond, temperature: 15, visibility: 10, windSpeed: nil, precipitation: nil)
+    }
+}
+
+enum RouteTimeOption: String, CaseIterable {
+    case live = "Live"
+    case earlyMorning = "Early Morning (6am)"
+    case morningRushWeekday = "Morning Rush (8am Weekday)"
+    case morningRushWeekend = "Morning Rush (9am Weekend)"
+    case daytime = "Daytime (12pm)"
+    case eveningRushWeekday = "Evening Rush (5pm Weekday)"
+    case eveningRushWeekend = "Evening Rush (6pm Weekend)"
+    case evening = "Evening (8pm)"
+    case lateNight = "Late Night (2am)"
+    case night = "Night (11pm)"
+
+    func timeOfDay() -> (hour: Int, isWeekend: Bool)? {
+        switch self {
+        case .live: return nil
+        case .earlyMorning: return (6, false)
+        case .morningRushWeekday: return (8, false)
+        case .morningRushWeekend: return (9, true)
+        case .daytime: return (12, false)
+        case .eveningRushWeekday: return (17, false)
+        case .eveningRushWeekend: return (18, true)
+        case .evening: return (20, false)
+        case .lateNight: return (2, false)
+        case .night: return (23, false)
+        }
+    }
+}
+
+// MARK: - Styled dropdown picker
+private struct StyledPickerRow<T: Hashable & CaseIterable & RawRepresentable>: View where T.AllCases: RandomAccessCollection, T.AllCases.Element == T, T.RawValue == String {
+    let title: String
+    @Binding var selection: T
+    let options: T.AllCases
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundColor(.secondary)
+            Menu {
+                ForEach(Array(options.enumerated()), id: \.offset) { _, opt in
+                    Button {
+                        selection = opt
+                    } label: {
+                        HStack {
+                            Text(opt.rawValue)
+                            if isSelected(opt) {
+                                Image(systemName: "checkmark")
+                                    .fontWeight(.semibold)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack {
+                    Text(selection.rawValue)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.primary)
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(UIColor.secondarySystemBackground))
+                .cornerRadius(10)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func isSelected(_ opt: T) -> Bool {
+        AnyHashable(opt) == AnyHashable(selection)
+    }
+}
+
 // Wrapper to inject environment objects into RouteNavigationView
 struct RouteNavigationViewWrapper: View {
     @EnvironmentObject var riskService: RiskService
@@ -35,6 +165,8 @@ struct RouteNavigationView: View {
     @State private var selectedRoute: Route?
     @State private var showRouteComparison = false
     @State private var currentWeather: WeatherData?
+    @State private var selectedWeather: RouteWeatherOption = .live
+    @State private var selectedTimeOfDay: RouteTimeOption = .live
 
     @State private var cameraPosition = MapCameraPosition.region(
         MKCoordinateRegion(
@@ -64,7 +196,9 @@ struct RouteNavigationView: View {
                 ZStack {
                     mapView
                     routeLegend
-                    weatherInfoBadge
+                    if selectedWeather == .live && selectedTimeOfDay == .live {
+                        weatherInfoBadge
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if showRouteComparison, routeService.saferRoute != nil, routeService.optimalRoute != nil {
@@ -75,7 +209,7 @@ struct RouteNavigationView: View {
                         routeSource: routeService.lastRouteSource,
                         onExportToAppleMaps: exportToAppleMaps,
                         onExportToGoogleMaps: exportToGoogleMaps,
-                        currentWeather: currentWeather
+                        currentWeather: selectedWeather == .live && selectedTimeOfDay == .live ? currentWeather : nil
                     )
                     .transition(.move(edge: .bottom))
                 }
@@ -255,13 +389,9 @@ struct RouteNavigationView: View {
     }
 
     @ViewBuilder
-    private var searchBarView: some View {
+    private var searchBarFormContent: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Button(action: useCurrentLocationAsStart) {
-                    Image(systemName: "location.fill")
-                        .foregroundColor(.brandTertiary)
-                }
                 AddressSearchField(
                     placeholder: "Start location",
                     iconName: "mappin.circle.fill",
@@ -274,7 +404,7 @@ struct RouteNavigationView: View {
             }
             .padding(.horizontal)
 
-            Divider().padding(.leading, 48)
+            Divider().padding(.leading, 16)
 
             AddressSearchField(
                 placeholder: "Destination",
@@ -286,6 +416,21 @@ struct RouteNavigationView: View {
                 updateCamera()
             }
             .padding(.horizontal)
+
+            HStack(spacing: 12) {
+                StyledPickerRow(
+                    title: "Time of day",
+                    selection: $selectedTimeOfDay,
+                    options: RouteTimeOption.allCases
+                )
+                StyledPickerRow(
+                    title: "Weather",
+                    selection: $selectedWeather,
+                    options: RouteWeatherOption.allCases
+                )
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
 
             Button(action: calculateRoutesAction) {
                 HStack {
@@ -315,10 +460,18 @@ struct RouteNavigationView: View {
                     .padding(.bottom, 4)
             }
         }
+    }
+
+    @ViewBuilder
+    private var searchBarView: some View {
+        searchBarFormContent
+            .fixedSize(horizontal: false, vertical: true)
         .background(Color(.systemBackground))
         .cornerRadius(12)
-        .shadow(radius: 5)
-        .padding()
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+        .padding(.horizontal)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
     }
 
     private func loadWeatherInfo() {
@@ -329,13 +482,6 @@ struct RouteNavigationView: View {
         }
     }
 
-    private func useCurrentLocationAsStart() {
-        if let location = locationManager.location {
-            startCoordinate = location.coordinate
-            startPoint = "Current Location"
-            updateCamera()
-        }
-    }
 
     private func calculateRoutesAction() {
         guard let start = startCoordinate, let dest = destinationCoordinate else {
@@ -343,17 +489,28 @@ struct RouteNavigationView: View {
             return
         }
 
-        Task {
-            let center = CLLocationCoordinate2D(
-                latitude: (start.latitude + dest.latitude) / 2,
-                longitude: (start.longitude + dest.longitude) / 2
-            )
-            let weather = await weatherService.getWeatherData(for: center)
-            await MainActor.run { currentWeather = weather }
-        }
+        let useLiveWeather = selectedWeather == .live
+        let useLiveTime = selectedTimeOfDay == .live
+
+        let customWeather = useLiveWeather ? nil : selectedWeather.toWeatherData()
+        let customTimeOfDay = useLiveTime ? nil : selectedTimeOfDay.timeOfDay()
 
         Task {
-            await routeService.calculateRoutes(from: start, to: dest)
+            if useLiveWeather {
+                let center = CLLocationCoordinate2D(
+                    latitude: (start.latitude + dest.latitude) / 2,
+                    longitude: (start.longitude + dest.longitude) / 2
+                )
+                let weather = await weatherService.getWeatherData(for: center)
+                await MainActor.run { currentWeather = weather }
+            }
+
+            await routeService.calculateRoutes(
+                from: start,
+                to: dest,
+                weather: customWeather,
+                timeOfDay: customTimeOfDay
+            )
             await MainActor.run {
                 if routeService.saferRoute != nil && routeService.optimalRoute != nil {
                     showRouteComparison = true
@@ -427,8 +584,16 @@ struct RouteNavigationView: View {
 
     private func exportToGoogleMaps(route: Route) {
         guard let start = startCoordinate, let dest = destinationCoordinate else { return }
-        if let encoded = route.googleMapsURL(origin: start, destination: dest), let u = URL(string: encoded) {
-            UIApplication.shared.open(u)
+        guard let encoded = route.googleMapsURL(origin: start, destination: dest), let u = URL(string: encoded) else { return }
+        UIApplication.shared.open(u) { success in
+            // Launch Services can fail with -54 "process may not map database" (Simulator/timing).
+            // Failure is non-fatal; user can retry or copy the URL manually.
+            if !success {
+                UIPasteboard.general.string = encoded
+                #if DEBUG
+                print("[exportToGoogleMaps] open failed (Launch Services -54 possible); URL copied to clipboard")
+                #endif
+            }
         }
     }
 
@@ -444,6 +609,12 @@ struct RouteComparisonCard: View {
     let onExportToGoogleMaps: (Route) -> Void
     let currentWeather: WeatherData?
     @State private var isExpanded = true
+    @State private var sheetHeight: CGFloat = 220
+    @State private var dragOffset: CGFloat = 0
+
+    private static let minHeight: CGFloat = 70
+    private static let midHeight: CGFloat = 220
+    private static let maxHeight: CGFloat = 420
 
     private var comparison: RouteComparison {
         RouteComparison(saferRoute: saferRoute, optimalRoute: optimalRoute)
@@ -462,9 +633,40 @@ struct RouteComparisonCard: View {
         return "Only one route available — safest and fastest are the same for this path."
     }
 
+    private func nearestDetent(for height: CGFloat) -> CGFloat {
+        let detents: [CGFloat] = [Self.minHeight, Self.midHeight, Self.maxHeight]
+        return detents.min(by: { abs($0 - height) < abs($1 - height) }) ?? Self.midHeight
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            Button(action: { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { isExpanded.toggle() } }) {
+            // Drag handle
+            RoundedRectangle(cornerRadius: 2.5)
+                .fill(Color(.systemGray4))
+                .frame(width: 36, height: 5)
+                .padding(.top, 8)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            dragOffset = -value.translation.height
+                        }
+                        .onEnded { value in
+                            let newHeight = sheetHeight + dragOffset
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                sheetHeight = min(Self.maxHeight, max(Self.minHeight, newHeight))
+                                sheetHeight = nearestDetent(for: sheetHeight)
+                                isExpanded = sheetHeight > Self.minHeight
+                            }
+                            dragOffset = 0
+                        }
+                )
+
+            Button(action: {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    isExpanded.toggle()
+                    sheetHeight = isExpanded ? Self.midHeight : Self.minHeight
+                }
+            }) {
                 HStack {
                     Text("Route Options").font(.headline)
                     Spacer()
@@ -571,9 +773,10 @@ struct RouteComparisonCard: View {
                     }
                     .padding(.bottom, 16)
                 }
-                .frame(maxHeight: 380)
+                .frame(maxHeight: Self.maxHeight - 60)
             }
         }
+        .frame(height: sheetHeight + dragOffset)
         .background(Color(.systemBackground))
         .cornerRadius(16, corners: [.topLeft, .topRight])
         .shadow(radius: 10)

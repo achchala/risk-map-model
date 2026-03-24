@@ -41,10 +41,11 @@ struct AddressSearchField: View {
             .padding()
             .background(Color(UIColor.systemBackground))
 
-            // Suggestions dropdown — show when we have results (not tied to focus so tap registers before dropdown hides)
+            // Suggestions dropdown — show when we have results (max height so form stays in bounds)
             if !completer.suggestions.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(completer.suggestions.enumerated()), id: \.offset) { index, suggestion in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(completer.suggestions.enumerated()), id: \.offset) { index, suggestion in
                         Button {
                             selectSuggestion(suggestion)
                         } label: {
@@ -73,8 +74,11 @@ struct AddressSearchField: View {
                             Divider()
                                 .padding(.leading, 40)
                         }
+                        }
                     }
                 }
+                .frame(maxHeight: 220)
+                .scrollIndicators(.automatic)
                 .background(Color(UIColor.secondarySystemBackground))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)

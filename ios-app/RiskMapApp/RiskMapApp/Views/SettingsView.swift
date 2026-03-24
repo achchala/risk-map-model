@@ -50,8 +50,8 @@ enum SafetySpeedBalance: String, CaseIterable {
     var beta: Double {
         switch self {
         case .speed: return 0.25
-        case .balanced: return 1.0
-        case .safety: return 3.0
+        case .balanced: return 1.5
+        case .safety: return 8.0
         }
     }
 
@@ -64,10 +64,10 @@ enum SafetySpeedBalance: String, CaseIterable {
         }
     }
 
-    /// Interpolate beta from slider value (0...1). Range 0.25 (speed) to 3.0 (safety).
+    /// Interpolate beta from slider value (0...1). Range 0.25 (speed) to 8.0 (safety).
     static func betaFromSlider(_ value: Double) -> Double {
         let v = max(0, min(1, value))
-        return 0.25 + v * 2.75
+        return 0.25 + v * 7.75
     }
 
     /// Interpolate time penalty from slider value (0...1)
@@ -90,10 +90,22 @@ struct SettingsView: View {
         SafetySpeedBalance(sliderValue: safetySpeedSlider)
     }
 
+    private static let riskAversionSteps: [Double] = [0, 0.5, 1.0]
+
+    private var riskAversionBinding: Binding<Double> {
+        Binding(
+            get: { safetySpeedSlider },
+            set: { newValue in
+                let nearest = Self.riskAversionSteps.min(by: { abs($0 - newValue) < abs($1 - newValue) }) ?? 0.5
+                safetySpeedSlider = nearest
+            }
+        )
+    }
+
     private func runConnectionTest() async {
         connectionTestMessage = nil
         isTestingConnection = true
-        let (ok, msg) = await riskService.testConnection()
+        let (_, msg) = await riskService.testConnection()
         await MainActor.run {
             isTestingConnection = false
             connectionTestMessage = msg
@@ -129,19 +141,23 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(header: Text("Route Planning"), footer: Text("Controls how the \"safer\" route balances risk avoidance with travel time. Slide left for faster routes; slide right to avoid high-risk roads.")) {
+                Section(header: Text("How risk averse are you?"), footer: Text("Controls how the \"safer\" route balances risk avoidance with travel time. Slide left for faster routes; slide right to avoid high-risk roads.")) {
                     HStack {
-                        Text("Speed")
+                        Text("Less")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Slider(value: $safetySpeedSlider, in: 0...1)
-                        Text("Safety")
+                        Slider(value: riskAversionBinding, in: 0...1)
+                        Text("More")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                     Text(currentBalance.subtitle)
                         .font(.caption)
                         .foregroundColor(.secondary)
+                }
+                .onAppear {
+                    let nearest = Self.riskAversionSteps.min(by: { abs($0 - safetySpeedSlider) < abs($1 - safetySpeedSlider) }) ?? 0.5
+                    if abs(safetySpeedSlider - nearest) > 0.001 { safetySpeedSlider = nearest }
                 }
 
                 Section(header: Text("Preferences")) {
